@@ -15,6 +15,7 @@
 #include <zephyr/drivers/usb/udc.h>
 #include <zephyr/sys/device_mmio.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/shell/shell.h>
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(dwc3, CONFIG_UDC_DRIVER_LOG_LEVEL);
@@ -1054,6 +1055,7 @@ static void udc_dwc3_next_ctrl(const struct device *const dev,
 
 	udc_ep_set_busy(&ep_data->cfg, true);
 
+	/* In DWC3 */
 	if (USB_EP_DIR_IS_IN(ep_data->cfg.addr)) {
 		udc_dwc3_next_ctrl_in(dev, buf);
 	} else {
@@ -1186,6 +1188,8 @@ static void udc_dwc3_on_usb_reset(const struct device *const dev)
 
 	/* Perform the USB reset operations manually to improve latency */
 	udc_dwc3_set_address(dev, 0);
+	/* Let Zephyr set the device address 0 */
+	udc_submit_event(dev, UDC_EVT_RESET, 0);
 }
 
 static void udc_dwc3_on_connect_done(const struct device *const dev)
@@ -1199,9 +1203,12 @@ static void udc_dwc3_on_connect_done(const struct device *const dev)
 	case UDC_DWC3_DSTS_CONNECTSPD_FS:
 	case UDC_DWC3_DSTS_CONNECTSPD_HS:
 		mps = 64;
+		/* This is not suspending USB3, it enables the suspend feature */
+		sys_set_bits(base + UDC_DWC3_GUSB3PIPECTL, UDC_DWC3_GUSB3PIPECTL_SUSPENDENABLE);
 		break;
 	case UDC_DWC3_DSTS_CONNECTSPD_SS:
 		mps = 512;
+		sys_set_bits(base + UDC_DWC3_GUSB2PHYCFG, UDC_DWC3_GUSB2PHYCFG_SUSPHY);
 		break;
 	}
 	__ASSERT_NO_MSG(mps != 0);
