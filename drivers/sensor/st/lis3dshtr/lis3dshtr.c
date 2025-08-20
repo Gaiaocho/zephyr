@@ -9,6 +9,7 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(LIS3DSHTR, CONFIG_SENSOR_LOG_LEVEL);
 
+#include <zephyr/device.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/drivers/sensor.h>
 
@@ -43,15 +44,16 @@ static int lis3dshtr_write_register(const struct device *dev, uint8_t reg, uint8
 static int lis3dshtr_read_register(const struct device *dev, uint8_t reg, uint8_t *val)  {
 	const struct st_lis3dshtr_config *cfg = dev->config;
 	int ret;
-	uint8_t tx_buf[1];
-	uint8_t rx_buf[1];
+	uint8_t tx_buf[2];
+	uint8_t rx_buf[2];
 
 	/*Write address to read*/
 	tx_buf[0] = 0x80 | reg;
+	tx_buf[1] = 0x00;
 
 	const struct spi_buf tx_buf_arr = {
 		.buf = tx_buf,
-		.len = 1,
+		.len = sizeof(tx_buf),
 	};
 	const struct spi_buf_set tx_set = {
 		.buffers = &tx_buf_arr,
@@ -73,6 +75,8 @@ static int lis3dshtr_read_register(const struct device *dev, uint8_t reg, uint8_
 		return ret;
 	}
 
+	*val = rx_buf[1];
+
 	return  ret;
 }
 
@@ -81,21 +85,23 @@ static int lis3dshtr_sample_fetch(const struct device *dev, enum sensor_channel 
 	struct st_lis3dshtr_data *data = dev->data;
 	int ret;
 
-	if (chan != SENSOR_CHAN_ACCEL_X) {
-		return -ENOTSUP;
+	if (chan != SENSOR_CHAN_ACCEL_X && chan != SENSOR_CHAN_ALL) {
+		LOG_ERR("selected channel in fetch not supported");
+		return -EINVAL;
 	}
 
 	ret = lis3dshtr_read_register(dev, 0x29, &data->sample_int);
+
 
 	if (ret != 0) {
 		LOG_ERR("Could not read channel HIGH byte");
 		return ret;
 	}
 
-	ret = lis3dshtr_read_register(dev, 0x28, &data->sample_int);
+	ret = lis3dshtr_read_register(dev, 0x28, &data->sample_dec);
 
 	if (ret != 0) {
-		LOG_ERR("Could not read channe LOW byte");
+		LOG_ERR("Could not read channel LOW byte");
 		return ret;
 	}
 
@@ -109,8 +115,10 @@ static int lis3dshtr_channel_get(const struct device *dev, enum sensor_channel c
 	int32_t micro_g;
 
 	if(chan != SENSOR_CHAN_ACCEL_X) {
+		LOG_ERR("selected channel in get (%d) not supported \n", chan);
 		return -ENOTSUP;
 	}
+
 
 	/*Combine high and low byte*/
 	raw = (int16_t)((data->sample_int << 8) | data->sample_dec);
@@ -121,7 +129,6 @@ static int lis3dshtr_channel_get(const struct device *dev, enum sensor_channel c
 	/*Fill sensor val with integer and fractional parts*/
 	val->val1 = micro_g/1000000;
 	val->val2 = micro_g%1000000;
-
 	return 0;
 }
 
@@ -152,6 +159,8 @@ static int st_lis3dshtr_init(const struct device *dev)
 		return ret;
 	}
 
+	LOG_INF("LIS3DSHTR initialized\n");
+
 	return ret;
 }
 
@@ -162,7 +171,7 @@ static int st_lis3dshtr_init(const struct device *dev)
 	};										\
 											\
 	SENSOR_DEVICE_DT_INST_DEFINE(inst,						\
-				     &st_lis3dshtr_init,				\
+				     st_lis3dshtr_init,				\
 				     NULL,						\
 				     &lis3dshtr_data_##inst,				\
 				     &lis3dshtr_config_##inst,				\

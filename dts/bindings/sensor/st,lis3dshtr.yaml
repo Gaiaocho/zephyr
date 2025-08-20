@@ -6,4 +6,4 @@ description: |
 
 compatible: "st,lis3dshtr"
 
-include: spi-device.yaml
+include: [sensor-device.yaml, spi-device.yaml]
