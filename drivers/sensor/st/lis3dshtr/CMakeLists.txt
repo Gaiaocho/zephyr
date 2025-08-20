@@ -1,3 +1,3 @@
 zephyr_library()
 
-zephyr_library(sources lis3dshtr.c)
+zephyr_library_sources(lis3dshtr.c)
