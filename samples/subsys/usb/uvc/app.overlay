@@ -15,7 +15,7 @@
 	};
 
 	chosen {
-		zephyr,camera = &csi_interface;
+		zephyr,camera = &csi_capture_port;
 	};
 
 	imx219_input_clock: imx219-input-clock {
