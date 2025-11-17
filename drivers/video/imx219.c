@@ -72,6 +72,7 @@ LOG_MODULE_REGISTER(imx219, CONFIG_VIDEO_LOG_LEVEL);
 #define IMX219_DT_PEDESTAL_DEFAULT	40
 
 #define IMX219_2DL_LINK_FREQ	456000000
+#define IMX219_PIXEL_RATE	(IMX219_2DL_LINK_FREQ/2)
 const int64_t imx219_2dl_link_frequency[] = {
 	IMX219_2DL_LINK_FREQ,
 };
@@ -83,6 +84,7 @@ struct imx219_ctrls {
 	struct video_ctrl digital_gain;
 	struct video_ctrl linkfreq;
 	struct video_ctrl test_pattern;
+	struct video_ctrl pixel_rate;
 };
 
 struct imx219_data {
@@ -284,8 +286,7 @@ static int imx219_get_caps(const struct device *dev, struct video_caps *caps)
 		return -EINVAL;
 	}
 
-	caps->min_line_count = LINE_COUNT_HEIGHT;
-	caps->max_line_count = LINE_COUNT_HEIGHT;
+
 	caps->format_caps = imx219_fmts;
 
 	return 0;
@@ -476,6 +477,14 @@ static int imx219_init_ctrls(const struct device *dev)
 
 	return video_init_menu_ctrl(&ctrls->test_pattern, dev, VIDEO_CID_TEST_PATTERN, 0,
 				    imx219_test_pattern_menu);
+
+	return video_init_ctrl(
+		&ctrls->pixel_rate, dev, VIDEO_CID_PIXEL_RATE,
+		(struct video_ctrl_range){
+			.min64 = IMX219_PIXEL_RATE,
+			.max64 = IMX219_PIXEL_RATE,
+			.step64 = 1,
+			.def64 = IMX219_PIXEL_RATE});
 }
 
 static int imx219_set_input_clk(const struct device *dev, uint32_t rate_hz)
