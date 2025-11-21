@@ -411,6 +411,7 @@ static int stm32_dcmipp_conf_csi(const struct device *dev, uint32_t dcmipp_csi_b
 							      DCMIPP_CSI_INVERTED_DATA_LANES;
 
 	/* Get link-frequency information from source */
+	LOG_ERR("this is the source dev, %s", config->source_dev->name);
 	phy_bitrate = video_get_csi_link_freq(config->source_dev,
 					      video_bits_per_pixel(dcmipp->source_fmt.pixelformat),
 					      config->csi.nb_lanes);

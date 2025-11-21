@@ -414,7 +414,7 @@ int64_t video_get_csi_link_freq(const struct device *dev, uint8_t bpp, uint8_t l
 	/* Try to get the LINK_FREQ value from the source device */
 	ret = video_get_ctrl(dev, &ctrl);
 	if (ret < 0) {
-		LOG_ERR("Initial video_get_ctrl explodes");
+		LOG_ERR("Initial video_get_ctrl explodes with:(%d)", ret);
 		goto fallback;
 	}
 
