@@ -11,6 +11,8 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/pm/device.h>
+#include <zephyr/pm/device_runtime.h>
 
 #include "mpu6050.h"
 
@@ -149,6 +151,32 @@ static DEVICE_API(sensor, mpu6050_driver_api) = {
 	.channel_get = mpu6050_channel_get,
 };
 
+static int mpu6050_pm_action(const struct device *dev,
+                                  enum pm_device_action action)
+{
+        int ret;
+
+        switch (action) {
+        case PM_DEVICE_ACTION_SUSPEND:
+		LOG_INF("Suspend action invoked");
+                break;
+        case PM_DEVICE_ACTION_RESUME:
+		LOG_INF("Resume action invoked");
+                break;
+        case PM_DEVICE_ACTION_TURN_OFF:
+		LOG_INF("Turn off action invoked");
+                break;
+        case PM_DEVICE_ACTION_TURN_ON:
+		LOG_INF("Turn on action invoked");
+                break;
+        default:
+                ret = -EINVAL;
+                break;
+        }
+
+        return ret;
+}
+
 int mpu6050_init(const struct device *dev)
 {
 	struct mpu6050_data *drv_data = dev->data;
@@ -239,8 +267,10 @@ int mpu6050_init(const struct device *dev)
 	}
 #endif
 
-	return 0;
+	return pm_device_driver_init(dev, mpu6050_pm_action);
 }
+
+#define PM_DEVICE_DT_INST_DEFINE(inst, mpu6050_pm_action);
 
 #define MPU6050_DEFINE(inst)									\
 	static struct mpu6050_data mpu6050_data_##inst;						\
@@ -254,7 +284,8 @@ int mpu6050_init(const struct device *dev)
 			   (.int_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, int_gpios, { 0 }),))	\
 	};											\
 												\
-	SENSOR_DEVICE_DT_INST_DEFINE(inst, mpu6050_init, NULL,					\
+	SENSOR_DEVICE_DT_INST_DEFINE(inst, mpu6050_init,                                        \
+			PM_DEVICE_DT_INST_GET(inst),					        \
 			      &mpu6050_data_##inst, &mpu6050_config_##inst,			\
 			      POST_KERNEL, CONFIG_SENSOR_INIT_PRIORITY,				\
 			      &mpu6050_driver_api);						\

@@ -1,0 +1,44 @@
+&flexcomm2_lpi2c2 {
+	status = "okay";
+
+	mpu6050@68 {
+		compatible = "invensense,mpu6050";
+		reg = <0x68>;
+		status = "okay";
+		smplrt-div = <249>;
+	};
+};
+
+
+
+/*
+&i2c22 {
+    status = "okay";
+    pinctrl-0 = <&i2c22_default>;
+    pinctrl-1 = <&i2c22_sleep>;
+    clock-frequency = <100000>;
+    pinctrl-names = "default", "sleep";
+    mysensor: mysensor@6b{
+        compatible = "i2c-device";
+        status = "okay";
+        reg = < 0x6b >;
+    };
+};
+
+&pinctrl {
+    /omit-if-no-ref/ i2c22_default: i2c22_default {
+        group1  {
+            psels = <NRF_PSEL(TWIM_SCL, 1, 11)>,
+                    <NRF_PSEL(TWIM_SDA, 1, 12)>;
+        };
+    };
+
+    /omit-if-no-ref/ i2c22_sleep: i2c22_sleep {
+        group1  {
+            psels = <NRF_PSEL(TWIM_SCL, 1, 11)>,
+                    <NRF_PSEL(TWIM_SDA, 1, 12)>;
+            low-power-enable;
+        };
+    };
+};
+*/
