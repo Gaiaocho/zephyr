@@ -955,7 +955,6 @@ static int uvc_get_control_op(const struct device *dev, const struct usb_setup_p
 	uint8_t ifnum = (setup->wIndex >> 0) & 0xff;
 	uint8_t unit_id = setup->wIndex >> 8;
 	uint8_t selector = setup->wValue >> 8;
-	uint8_t subtype = 0;
 	int ret;
 
 
@@ -1004,9 +1003,6 @@ static int uvc_get_control_op(const struct device *dev, const struct usb_setup_p
 		}
 	}
 
-	if (subtype == 0) {
-		goto err;
-	}
 
 	*map = NULL;
 	for (int i = 0; i < list_sz; i++) {
@@ -1528,6 +1524,14 @@ int uvc_device_enable(const struct device *const dev)
 	if (ret != 0) {
 		return ret;
 	}
+
+
+#if CONFIG_USBD_VIDEO_ISO
+	ret = uvc_assign_desc(dev, &cfg->desc->if1_alt, true, true);
+	if (ret != 0) {
+		return ret;
+	}
+#endif
 
 	ret = uvc_assign_desc(dev, &cfg->desc->if1_ep_fs, true, false);
 	if (ret != 0) {
@@ -2099,6 +2103,7 @@ static int uvc_preinit(const struct device *dev)
 #if CONFIG_USBD_VIDEO_ISO
 #define EP_INTERVAL		1
 #define IF1_EP_TYPE		USB_EP_TYPE_ISO
+#define IF1_HDR_EP_NUM		0
 #define IF1_ALT_DESCS(n) (struct usb_desc_header *) &uvc_desc_##n.if1_alt,
 
 #else
@@ -2107,6 +2112,7 @@ static int uvc_preinit(const struct device *dev)
 #define USBD_VIDEO_ENDPOINT_DESC
 #define IF1_ALT_DESCS(n)
 #define EP_INTERVAL		0
+#define IF1_HDR_EP_NUM		1
 
 #endif
 
@@ -2221,6 +2227,18 @@ static struct uvc_desc uvc_desc_##n = {						\
 		.bDescriptorType = USB_DESC_INTERFACE,				\
 		.bInterfaceNumber = 1,						\
 		.bAlternateSetting = 0,						\
+		.bNumEndpoints = IF1_HDR_EP_NUM,				\
+		.bInterfaceClass = USB_BCC_VIDEO,				\
+		.bInterfaceSubClass = UVC_SC_VIDEOSTREAMING,			\
+		.bInterfaceProtocol = 0,					\
+		.iInterface = 0,						\
+	},									\
+										\
+	.if1_alt = {								\
+		.bLength = sizeof(struct usb_if_descriptor),			\
+		.bDescriptorType = USB_DESC_INTERFACE,				\
+		.bInterfaceNumber = 1,						\
+		.bAlternateSetting = 1,						\
 		.bNumEndpoints = 1,						\
 		.bInterfaceClass = USB_BCC_VIDEO,				\
 		.bInterfaceSubClass = UVC_SC_VIDEOSTREAMING,			\
@@ -2285,7 +2303,6 @@ struct usb_desc_header *uvc_fs_desc_##n[UVC_MAX_FS_DESC] = {			\
 	(struct usb_desc_header *) &uvc_desc_##n.if1,				\
 	(struct usb_desc_header *) &uvc_desc_##n.if1_hdr,			\
 	/* More pointers are generated here at runtime */			\
-	IF1_ALT_DESCS(n)							\
 	(struct usb_desc_header *) &uvc_desc_##n.if1_ep_fs,			\
 	(struct usb_desc_header *) NULL,					\
 };										\
@@ -2301,7 +2318,6 @@ struct usb_desc_header *uvc_hs_desc_##n[UVC_MAX_HS_DESC] = {			\
 	(struct usb_desc_header *) &uvc_desc_##n.if0_ot,			\
 	(struct usb_desc_header *) &uvc_desc_##n.if1,				\
 	(struct usb_desc_header *) &uvc_desc_##n.if1_hdr,			\
-	IF1_ALT_DESCS(n)							\
 	/* More pointers are generated here at runtime */			\
 	(struct usb_desc_header *) &uvc_desc_##n.if1_ep_hs,			\
 	(struct usb_desc_header *) NULL,					\
