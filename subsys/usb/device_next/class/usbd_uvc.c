@@ -1820,7 +1820,6 @@ static struct net_buf *uvc_continue_transfer(const struct device *dev,
 					     size_t *const next_vbuf_offset)
 {
 	struct uvc_data *data = dev->data;
-	struct video_format *fmt = &data->video_fmt;
 	struct net_buf *buf;
 	/* Workaround net_buf that uses uint16_t storage for lengths and offsets */
 	const size_t max_len = 0xf000;
@@ -1837,17 +1836,21 @@ static struct net_buf *uvc_continue_transfer(const struct device *dev,
 	//add iso headers
 	net_buf_add_mem(buf, &data->payload_header, data->payload_header.bHeaderLength);
 
-	net_buf_add_mem(buf, vbuf->buffer + (data->vbuf_offset - data->payload_header.bHeaderLength),
-			(*next_vbuf_offset - data->payload_header.bHeaderLength));
-	/* If uncompressed and line-based format, update the next line position in the frame */
-	if (fmt->pitch > 0) {
-		*next_line_offset = vbuf->line_offset + ((buf->len - data->payload_header.bHeaderLength) / fmt->pitch);
+	if(vbuf->bytesused <= net_buf_tailroom(buf)) {
+		*next_vbuf_offset = vbuf->bytesused;
+	} else {
+		while(!IS_UDC_ALIGNED((uintptr_t)&vbuf->buffer[net_buf_tailroom(buf)])) {
+			net_buf_add_u8(buf, 0);
+			((struct uvc_payload_header *)buf->data)->bHeaderLength++;
+		}
+
+		*next_vbuf_offset = net_buf_tailroom(buf);
 	}
 
-	/* The entire video buffer is now submitted */
-	*next_vbuf_offset = data->vbuf_offset + (buf_len - data->payload_header.bHeaderLength);
+	net_buf_add_mem(buf, vbuf->buffer, *next_vbuf_offset);
 
 #else
+	struct video_format *fmt = &data->video_fmt;
 	const size_t buf_len = MIN(max_len, vbuf->bytesused - data->vbuf_offset);
 
 	/* Directly pass the vbuf content with zero-copy */
