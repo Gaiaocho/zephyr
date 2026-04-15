@@ -237,6 +237,19 @@ static size_t uvc_get_bulk_mps(struct usbd_class_data *const c_data)
 	return 64U;
 }
 
+static size_t uvc_get_iso_mps(struct usbd_class_data *const c_data)
+{
+	struct usbd_context *uds_ctx = usbd_class_get_ctx(c_data);
+
+	if(USBD_SUPPORTS_HIGH_SPEED &&
+	   usbd_bus_speed(uds_ctx) == USBD_SPEED_HS) {
+		return 1024U;
+	}
+
+	return 1023U;
+}
+
+
 static int uvc_get_vs_probe_format_index(const struct device *dev, struct uvc_probe *const probe,
 					 const uint8_t request)
 {
@@ -382,9 +395,14 @@ static int uvc_get_vs_probe_frame_interval(const struct device *dev, struct uvc_
 static int uvc_get_vs_probe_max_size(const struct device *dev, struct uvc_probe *const probe,
 				     const uint8_t request)
 {
+#if CONFIG_USBD_VIDEO_ISO
+	const struct uvc_config *cfg = dev->config;
+	uint32_t max_frame_size = uvc_get_iso_mps(cfg->c_data);
+#else
 	struct uvc_data *data = dev->data;
 	struct video_format *fmt = &data->video_fmt;
 	uint32_t max_frame_size = fmt->size;
+#endif
 	uint32_t max_payload_size = max_frame_size + UVC_MAX_HEADER_LENGTH;
 
 	switch (request) {
@@ -1398,12 +1416,19 @@ static int uvc_add_vs_frame_desc(const struct device *dev,
 	desc->dwMinBitRate = sys_cpu_to_le32(UINT32_MAX);
 	desc->dwMaxBitRate = sys_cpu_to_le32(0);
 
+	size_t max_frame_buffer_size;
+#if CONFIG_USBD_VIDEO_ISO
+	max_frame_buffer_size = uvc_get_iso_mps(cfg->c_data);
+#else
+	max_frame_buffer_size = fmt->size;
+#endif
+
 	if (format_desc->bDescriptorSubtype == UVC_VS_FORMAT_UNCOMPRESSED) {
 		struct uvc_frame_uncomp_discrete_descriptor *const frame_desc = (void *)desc;
 
 		frame_desc->bLength = sizeof(*frame_desc) - sizeof(frame_desc->dwFrameInterval);
 		frame_desc->bDescriptorSubtype = UVC_VS_FRAME_UNCOMPRESSED;
-		frame_desc->dwMaxVideoFrameBufferSize = fmt->size;
+		frame_desc->dwMaxVideoFrameBufferSize = max_frame_buffer_size;
 		dwFrameInterval = (uint8_t *)&frame_desc->dwFrameInterval;
 		bFrameIntervalType = (uint8_t *)&frame_desc->bFrameIntervalType;
 		dwDefaultFrameInterval = (uint8_t *)&frame_desc->dwDefaultFrameInterval;
@@ -1412,7 +1437,7 @@ static int uvc_add_vs_frame_desc(const struct device *dev,
 
 		frame_desc->bLength = sizeof(*frame_desc) - sizeof(frame_desc->dwFrameInterval);
 		frame_desc->bDescriptorSubtype = UVC_VS_FRAME_MJPEG;
-		frame_desc->dwMaxVideoFrameBufferSize = fmt->size;
+		frame_desc->dwMaxVideoFrameBufferSize = max_frame_buffer_size;
 		dwFrameInterval = (uint8_t *)&frame_desc->dwFrameInterval;
 		bFrameIntervalType = (uint8_t *)&frame_desc->bFrameIntervalType;
 		dwDefaultFrameInterval = (uint8_t *)&frame_desc->dwDefaultFrameInterval;
@@ -1725,7 +1750,11 @@ static struct net_buf *uvc_initiate_transfer(const struct device *dev,
 	const struct uvc_config *cfg = dev->config;
 	struct uvc_data *data = dev->data;
 	struct video_format *fmt = &data->video_fmt;
+#if CONFIG_USBD_VIDEO_ISO
+	size_t mps = uvc_get_iso_mps(cfg->c_data);
+#else
 	size_t mps = uvc_get_bulk_mps(cfg->c_data);
+#endif
 	struct net_buf *buf;
 
 	buf = net_buf_alloc_len(&uvc_buf_pool, mps, K_NO_WAIT);
@@ -1777,6 +1806,7 @@ static struct net_buf *uvc_initiate_transfer(const struct device *dev,
 	return buf;
 }
 
+#if !CONFIG_USBD_VIDEO_ISO
 /*
  * Handling the continuation of USB transfers marked by 'v' below:
  *              v                                       v
@@ -1813,6 +1843,7 @@ static struct net_buf *uvc_continue_transfer(const struct device *dev,
 
 	return buf;
 }
+#endif
 
 static int uvc_reset_transfer(const struct device *dev)
 {
@@ -1872,11 +1903,16 @@ static int uvc_flush_vbuf(const struct device *dev, struct video_buffer *const v
 		return uvc_reset_transfer(dev);
 	}
 
+#if CONFIG_USBD_VIDEO_ISO
+	buf = uvc_initiate_transfer(dev, vbuf, &next_line_offset, &next_vbuf_offset);
+#else
+
 	if (data->vbuf_offset == 0) {
 		buf = uvc_initiate_transfer(dev, vbuf, &next_line_offset, &next_vbuf_offset);
 	} else {
 		buf = uvc_continue_transfer(dev, vbuf, &next_line_offset, &next_vbuf_offset);
 	}
+#endif
 	if (buf == NULL) {
 		return -ENOMEM;
 	}
@@ -2105,6 +2141,8 @@ static int uvc_preinit(const struct device *dev)
 #define IF1_EP_TYPE		USB_EP_TYPE_ISO
 #define IF1_HDR_EP_NUM		0
 #define IF1_ALT_DESCS(n) (struct usb_desc_header *) &uvc_desc_##n.if1_alt,
+#define MPS_FS			1023
+#define MPS_HS			1024
 
 #else
 
@@ -2113,6 +2151,8 @@ static int uvc_preinit(const struct device *dev)
 #define IF1_ALT_DESCS(n)
 #define EP_INTERVAL		0
 #define IF1_HDR_EP_NUM		1
+#define MPS_FS			64
+#define MPS_HS			512
 
 #endif
 
@@ -2277,7 +2317,7 @@ static struct uvc_desc uvc_desc_##n = {						\
 		.bDescriptorType = USB_DESC_ENDPOINT,				\
 		.bEndpointAddress = 0x81,					\
 		.bmAttributes = IF1_EP_TYPE,					\
-		.wMaxPacketSize = sys_cpu_to_le16(64),				\
+		.wMaxPacketSize = sys_cpu_to_le16(MPS_FS),				\
 		.bInterval = EP_INTERVAL,					\
 	},									\
 										\
@@ -2286,7 +2326,7 @@ static struct uvc_desc uvc_desc_##n = {						\
 		.bDescriptorType = USB_DESC_ENDPOINT,				\
 		.bEndpointAddress = 0x81,					\
 		.bmAttributes = IF1_EP_TYPE,					\
-		.wMaxPacketSize = sys_cpu_to_le16(512),				\
+		.wMaxPacketSize = sys_cpu_to_le16(MPS_HS),				\
 		.bInterval = EP_INTERVAL,					\
 	},									\
 };										\
