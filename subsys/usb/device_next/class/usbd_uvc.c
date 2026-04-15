@@ -91,9 +91,7 @@ struct uvc_desc {
 	struct uvc_stream_header_descriptor if1_hdr;
 	union uvc_fmt_desc if1_fmts[CONFIG_USBD_VIDEO_MAX_FORMATS];
 	struct uvc_color_descriptor if1_color;
-#if CONFIG_USBD_VIDEO_ISO
 	struct usb_if_descriptor if1_alt;
-#endif
 	struct usb_ep_descriptor if1_ep_fs;
 	struct usb_ep_descriptor if1_ep_hs;
 };
@@ -1821,6 +1819,7 @@ static struct net_buf *uvc_continue_transfer(const struct device *dev,
 {
 	struct uvc_data *data = dev->data;
 	struct net_buf *buf;
+	struct video_format *fmt = &data->video_fmt;
 	/* Workaround net_buf that uses uint16_t storage for lengths and offsets */
 	const size_t max_len = 0xf000;
 #if CONFIG_USBD_VIDEO_ISO
@@ -1833,13 +1832,19 @@ static struct net_buf *uvc_continue_transfer(const struct device *dev,
 		return NULL;
 	}
 
+	if (fmt->pitch > 0) {
+		*next_line_offset = vbuf->line_offset + (buf->len - *next_vbuf_offset) / fmt->pitch;
+	}
+
 	//add iso headers
 	net_buf_add_mem(buf, &data->payload_header, data->payload_header.bHeaderLength);
 
-	if(vbuf->bytesused <= net_buf_tailroom(buf)) {
+	if (vbuf->bytesused <= net_buf_tailroom(buf)) {
+		/* Very short video buffer fitting in the first packet */
 		*next_vbuf_offset = vbuf->bytesused;
 	} else {
-		while(!IS_UDC_ALIGNED((uintptr_t)&vbuf->buffer[net_buf_tailroom(buf)])) {
+		/* Pad the USB buffer until the next video buffer pointer is aligned for UDC */
+		while (!IS_UDC_ALIGNED((uintptr_t)&vbuf->buffer[net_buf_tailroom(buf)])) {
 			net_buf_add_u8(buf, 0);
 			((struct uvc_payload_header *)buf->data)->bHeaderLength++;
 		}
@@ -1847,10 +1852,9 @@ static struct net_buf *uvc_continue_transfer(const struct device *dev,
 		*next_vbuf_offset = net_buf_tailroom(buf);
 	}
 
-	net_buf_add_mem(buf, vbuf->buffer, *next_vbuf_offset);
+	net_buf_add_mem(buf, vbuf->buffer + data->vbuf_offset, *next_vbuf_offset);
 
 #else
-	struct video_format *fmt = &data->video_fmt;
 	const size_t buf_len = MIN(max_len, vbuf->bytesused - data->vbuf_offset);
 
 	/* Directly pass the vbuf content with zero-copy */
