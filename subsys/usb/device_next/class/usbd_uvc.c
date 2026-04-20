@@ -1736,6 +1736,69 @@ static int uvc_request(struct usbd_class_data *const c_data, struct net_buf *con
 	return 0;
 }
 
+static struct net_buf *uvc_iso_transfer(const struct device *dev,
+					struct video_buffer *const vbuf,
+					size_t *const next_line_offset,
+					size_t *const next_vbuf_offset)
+{
+	struct uvc_data *data = dev->data;
+	struct net_buf *buf;
+	struct video_format *fmt = &data->video_fmt;
+	/* Workaround net_buf that uses uint16_t storage for lengths and offsets */
+	const size_t max_len = 0xf000;
+	const struct uvc_config *cfg = dev->config;
+	const size_t buf_len = MIN(max_len, uvc_get_iso_mps(cfg->c_data));
+
+	buf = net_buf_alloc_len(&uvc_buf_pool, buf_len, K_NO_WAIT);
+	if(buf == NULL) {
+		LOG_DBG("Cannot allocate ISO continuation buffer for now");
+		return NULL;
+	}
+
+
+	LOG_WRN("Before adding ->vbufoffset: %d *next_vbuf_offset: %d \n",
+			data->vbuf_offset, *next_vbuf_offset);
+
+	//add iso headers
+	net_buf_add_mem(buf, &data->payload_header, data->payload_header.bHeaderLength);
+
+	if (vbuf->bytesused <= net_buf_tailroom(buf)) {
+		/* Very short video buffer fitting in the first packet */
+		*next_vbuf_offset = vbuf->bytesused;
+	} else {
+		*next_vbuf_offset = net_buf_tailroom(buf);
+	}
+
+	if (fmt->pitch > 0) {
+		*next_line_offset = vbuf->line_offset + vbuf->bytesused / fmt->pitch;
+	}
+
+	LOG_WRN("After Header ->vbufoffset: %d *next_vbuf_offset: %d \n",
+			data->vbuf_offset, *next_vbuf_offset);
+
+	net_buf_add_mem(buf, vbuf->buffer + data->vbuf_offset, *next_vbuf_offset);
+
+	LOG_WRN("After Adding ->vbufoffset: %d *next_vbuf_offset: %d \n",
+			data->vbuf_offset, *next_vbuf_offset);
+
+	/* If this new USB transfer will complete this frame */
+	if (fmt->pitch == 0 || *next_line_offset >= fmt->height) {
+		LOG_DBG("Last USB transfer for this buffer");
+
+		/* Flag that this current transfer is the last */
+		((struct uvc_payload_header *)buf->data)->bmHeaderInfo |=
+			UVC_BMHEADERINFO_END_OF_FRAME;
+
+		/* Toggle the Frame ID of the next vbuf */
+		data->payload_header.bmHeaderInfo ^= UVC_BMHEADERINFO_FRAMEID;
+
+		*next_line_offset = 0;
+	}
+
+
+	return buf;
+}
+
 /*
  * Handling the start of USB transfers marked by 'v' below:
  * v                                       v
@@ -1750,11 +1813,7 @@ static struct net_buf *uvc_initiate_transfer(const struct device *dev,
 	const struct uvc_config *cfg = dev->config;
 	struct uvc_data *data = dev->data;
 	struct video_format *fmt = &data->video_fmt;
-#if CONFIG_USBD_VIDEO_ISO
-	size_t mps = uvc_get_iso_mps(cfg->c_data);
-#else
 	size_t mps = uvc_get_bulk_mps(cfg->c_data);
-#endif
 	struct net_buf *buf;
 
 	buf = net_buf_alloc_len(&uvc_buf_pool, mps, K_NO_WAIT);
@@ -1822,39 +1881,6 @@ static struct net_buf *uvc_continue_transfer(const struct device *dev,
 	struct video_format *fmt = &data->video_fmt;
 	/* Workaround net_buf that uses uint16_t storage for lengths and offsets */
 	const size_t max_len = 0xf000;
-#if CONFIG_USBD_VIDEO_ISO
-	const struct uvc_config *cfg = dev->config;
-	const size_t buf_len = MIN(max_len, uvc_get_iso_mps(cfg->c_data));
-
-	buf = net_buf_alloc_len(&uvc_buf_pool, buf_len, K_NO_WAIT);
-	if(buf == NULL) {
-		LOG_DBG("Cannot allocate ISO continuation buffer for now");
-		return NULL;
-	}
-
-	if (fmt->pitch > 0) {
-		*next_line_offset = vbuf->line_offset + (buf->len - *next_vbuf_offset) / fmt->pitch;
-	}
-
-	//add iso headers
-	net_buf_add_mem(buf, &data->payload_header, data->payload_header.bHeaderLength);
-
-	if (vbuf->bytesused <= net_buf_tailroom(buf)) {
-		/* Very short video buffer fitting in the first packet */
-		*next_vbuf_offset = vbuf->bytesused;
-	} else {
-		/* Pad the USB buffer until the next video buffer pointer is aligned for UDC */
-		while (!IS_UDC_ALIGNED((uintptr_t)&vbuf->buffer[net_buf_tailroom(buf)])) {
-			net_buf_add_u8(buf, 0);
-			((struct uvc_payload_header *)buf->data)->bHeaderLength++;
-		}
-
-		*next_vbuf_offset = net_buf_tailroom(buf);
-	}
-
-	net_buf_add_mem(buf, vbuf->buffer + data->vbuf_offset, *next_vbuf_offset);
-
-#else
 	const size_t buf_len = MIN(max_len, vbuf->bytesused - data->vbuf_offset);
 
 	/* Directly pass the vbuf content with zero-copy */
@@ -1871,7 +1897,6 @@ static struct net_buf *uvc_continue_transfer(const struct device *dev,
 
 	/* The entire video buffer is now submitted */
 	*next_vbuf_offset = data->vbuf_offset + buf_len;
-#endif
 
 	return buf;
 }
@@ -1934,11 +1959,15 @@ static int uvc_flush_vbuf(const struct device *dev, struct video_buffer *const v
 		return uvc_reset_transfer(dev);
 	}
 
+#if CONFIG_USBD_VIDEO_ISO
+	buf = uvc_iso_transfer(dev,vbuf, &next_line_offset, &next_vbuf_offset);
+#else
 	if (data->vbuf_offset == 0) {
 		buf = uvc_initiate_transfer(dev, vbuf, &next_line_offset, &next_vbuf_offset);
 	} else {
 		buf = uvc_continue_transfer(dev, vbuf, &next_line_offset, &next_vbuf_offset);
 	}
+#endif
 	if (buf == NULL) {
 		return -ENOMEM;
 	}
@@ -1946,7 +1975,7 @@ static int uvc_flush_vbuf(const struct device *dev, struct video_buffer *const v
 	bi = (struct uvc_buf_info *)udc_get_buf_info(buf);
 	bi->udc.ep = uvc_get_bulk_in(dev);
 
-	LOG_DBG("Video buffer %p, offset %zu/%u, size %d",
+	LOG_WRN("Video buffer %p, offset %zu/%u, size %d",
 		vbuf, data->vbuf_offset, vbuf->bytesused, buf->len);
 
 	/* End-of-Transfer condition */
