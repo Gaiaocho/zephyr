@@ -1755,46 +1755,26 @@ static struct net_buf *uvc_iso_transfer(const struct device *dev,
 		return NULL;
 	}
 
-
-	LOG_WRN("Before adding ->vbufoffset: %d *next_vbuf_offset: %d \n",
-			data->vbuf_offset, *next_vbuf_offset);
+	if (fmt->pitch > 0) {
+		*next_line_offset = vbuf->line_offset + vbuf->bytesused / fmt->pitch;
+	}
 
 	//add iso headers
 	net_buf_add_mem(buf, &data->payload_header, data->payload_header.bHeaderLength);
 
-	if (vbuf->bytesused <= net_buf_tailroom(buf)) {
+	if (vbuf->bytesused <= net_buf_tailroom(buf)  ||  *next_vbuf_offset > vbuf->bytesused) {
 		/* Very short video buffer fitting in the first packet */
 		*next_vbuf_offset = vbuf->bytesused;
 	} else {
 		*next_vbuf_offset = net_buf_tailroom(buf);
 	}
 
-	if (fmt->pitch > 0) {
-		*next_line_offset = vbuf->line_offset + vbuf->bytesused / fmt->pitch;
-	}
-
-	LOG_WRN("After Header ->vbufoffset: %d *next_vbuf_offset: %d \n",
-			data->vbuf_offset, *next_vbuf_offset);
-
 	net_buf_add_mem(buf, vbuf->buffer + data->vbuf_offset, *next_vbuf_offset);
 
-	LOG_WRN("After Adding ->vbufoffset: %d *next_vbuf_offset: %d \n",
-			data->vbuf_offset, *next_vbuf_offset);
-
-	/* If this new USB transfer will complete this frame */
-	if (fmt->pitch == 0 || *next_line_offset >= fmt->height) {
-		LOG_DBG("Last USB transfer for this buffer");
-
-		/* Flag that this current transfer is the last */
-		((struct uvc_payload_header *)buf->data)->bmHeaderInfo |=
-			UVC_BMHEADERINFO_END_OF_FRAME;
-
-		/* Toggle the Frame ID of the next vbuf */
-		data->payload_header.bmHeaderInfo ^= UVC_BMHEADERINFO_FRAMEID;
-
-		*next_line_offset = 0;
+	if(*next_vbuf_offset == vbuf->bytesused) {
+	} else  {
+		*next_vbuf_offset = data->vbuf_offset + *next_vbuf_offset;
 	}
-
 
 	return buf;
 }
@@ -1842,7 +1822,6 @@ static struct net_buf *uvc_initiate_transfer(const struct device *dev,
 			net_buf_add_u8(buf, 0);
 			((struct uvc_payload_header *)buf->data)->bHeaderLength++;
 		}
-
 		*next_vbuf_offset = net_buf_tailroom(buf);
 	}
 
