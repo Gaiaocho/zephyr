@@ -1780,6 +1780,10 @@ static int udc_dwc3_ep_enable(const struct device *const dev,
 	udc_dwc3_depcmd_ep_xfer_config(dev, ep_data);
 
 	if (USB_EP_GET_IDX(ep_data->cfg.addr) > 0) {
+		/** Check if this EP is ISO */
+		if((cfg.attributes & USB_EP_TRANSFER_TYPE_MASK) == USB_EP_TYPE_ISO) {
+			udc_dwc3_trb_iso_init(dev, ep_data);
+		}
 		udc_dwc3_trb_norm_init(dev, ep_data);
 	}
 
