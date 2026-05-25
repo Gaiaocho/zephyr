@@ -69,6 +69,8 @@ LOG_MODULE_REGISTER(dwc3, CONFIG_UDC_DRIVER_LOG_LEVEL);
 #define UDC_DWC3_DEPEVT_STATUS_B3_CONTROL_SETUP			(0x0 << 0)
 #define UDC_DWC3_DEPEVT_STATUS_B3_CONTROL_DATA			(0x1 << 0)
 #define UDC_DWC3_DEPEVT_STATUS_B3_CONTROL_STATUS		(0x2 << 0)
+#define UDC_DWC3_DEPEVT_NOTREADY_REASON				BIT(15)
+#define UDC_DWC3_DEPEVT_MICROFRAME_NUM				GENMASK(31, 16)
 /* For XferComplete or XferInProgress */
 #define UDC_DWC3_DEPEVT_STATUS_BUSERR				BIT(0)
 #define UDC_DWC3_DEPEVT_STATUS_SHORT				BIT(1)
@@ -103,6 +105,7 @@ LOG_MODULE_REGISTER(dwc3, CONFIG_UDC_DRIVER_LOG_LEVEL);
 #define UDC_DWC3_DEPCMD_STATUS_OK				(0 << 12)
 #define UDC_DWC3_DEPCMD_STATUS_CMDERR				(1 << 12)
 #define UDC_DWC3_DEPCMD_XFERRSCIDX_MASK				GENMASK(22, 16)
+#define UDC_DWC3_DEPCMD_STARTMICROFRAMNUM_MASK			GENMASK(31, 16)
 /* DEPCFG Command and Parameters */
 #define UDC_DWC3_DEPCMD_DEPCFG					(1 << 0)
 #define UDC_DWC3_DEPCMDPAR0_DEPCFG_EPTYPE_MASK			GENMASK(2, 1)
@@ -803,7 +806,6 @@ static void udc_dwc3_depcmd_set_stall(const struct device *const dev,
 
 	udc_dwc3_depcmd(dev, UDC_DWC3_DEPCMD(ep_data->epn), UDC_DWC3_DEPCMD_DEPSETSTALL);
 }
-
 static void udc_dwc3_depcmd_clear_stall(const struct device *const dev,
 					struct udc_dwc3_ep_data *const ep_data)
 {
@@ -827,11 +829,13 @@ static void udc_dwc3_depcmd_start_xfer(const struct device *const dev,
 	sys_write32(HI32((uintptr_t)ep_data->trb_buf), base + UDC_DWC3_DEPCMDPAR0(ep_data->epn));
 	sys_write32(LO32((uintptr_t)ep_data->trb_buf), base + UDC_DWC3_DEPCMDPAR1(ep_data->epn));
 
+
 	ep_data->xferrscidx =
-		udc_dwc3_depcmd(dev, UDC_DWC3_DEPCMD(ep_data->epn), UDC_DWC3_DEPCMD_DEPSTRTXFER);
+			udc_dwc3_depcmd(dev, UDC_DWC3_DEPCMD(ep_data->epn),
+					UDC_DWC3_DEPCMD_DEPSTRTXFER);
 
 	LOG_DBG("DepStartXfer done ep=0x%02x xferrscidx=0x%x",
-		ep_data->cfg.addr, ep_data->xferrscidx);
+				ep_data->cfg.addr, ep_data->xferrscidx);
 }
 
 static void udc_dwc3_depcmd_update_xfer(const struct device *const dev,
@@ -904,6 +908,29 @@ static void udc_dwc3_trb_norm_init(const struct device *const dev,
 	udc_dwc3_depcmd_start_xfer(dev, ep_data);
 }
 
+static void udc_dwc3_trb_iso_init(const struct device *const dev,
+		struct udc_dwc3_ep_data *const ep_data)
+{
+	volatile struct udc_dwc3_trb *const trb = ep_data->trb_buf;
+	const uint32_t link = CONFIG_UDC_DWC3_TRB_NUM - 1;
+
+	LOG_DBG("Initialize isoc TRB");
+
+	/* 1. First TRB should have ISOC FIRST
+	 * 2. Use a LINK at the end to make a circular buffer
+	 */
+
+	trb[0].ctrl = UDC_DWC3_TRB_CTRL_TRBCTL_ISOCHRONOUS_1 | UDC_DWC3_TRB_CTRL_CHN;
+
+	/** Make the transfer pending */
+	trb[0].ctrl &= ~UDC_DWC3_TRB_CTRL_HWO;
+
+
+	trb[link].ctrl = UDC_DWC3_TRB_CTRL_TRBCTL_LINK_TRB | UDC_DWC3_TRB_CTRL_HWO;
+	trb[link].addr_lo = LO32((uintptr_t)ep_data->trb_buf);
+	trb[link].addr_hi = HI32((uintptr_t)ep_data->trb_buf);
+}
+
 static void udc_dwc3_trb_ctrl_out(const struct device *const dev,
 				  struct net_buf *const buf,
 				  const uint32_t ctrl)
@@ -948,6 +975,39 @@ static void udc_dwc3_trb_ctrl_in(const struct device *const dev,
 	udc_dwc3_depcmd_start_xfer(dev, ep_data);
 }
 
+static int udc_dwc3_trb_iso(const struct device *const dev,
+			struct udc_dwc3_ep_data *const ep_data,
+			struct net_buf *const buf)
+{
+	uint32_t ctrl = UDC_DWC3_TRB_CTRL_IOC | UDC_DWC3_TRB_CTRL_HWO | UDC_DWC3_TRB_CTRL_CSP;
+
+	LOG_INF("TRB_ISOC_EP_0x%02x, buf %p, data %p, size %u len %u",
+			ep_data->cfg.addr, (void *)buf, (void *)buf->data, buf->size, buf->len);
+
+	if (ep_data ->full) {
+		return -EBUSY;
+	}
+
+	ctrl |= UDC_DWC3_TRB_CTRL_TRBCTL_ISOCHRONOUS_N;
+	ep_data->total += buf->len;
+
+	if (USB_EP_DIR_IS_IN(ep_data->cfg.addr) &&
+			ep_data->total % ep_data->cfg.mps == 0)
+	{
+		/* do we really need this check give ISOC does constant size/time packets?*/
+		LOG_DBG("Buffer is a multiple of %d, continuing this transfer of %u bytes",
+				ep_data->cfg.mps, ep_data->total);
+		ctrl |= UDC_DWC3_TRB_CTRL_CHN;
+	} else {
+		LOG_DBG("End of USB transfer, %u bytes transferred", ep_data->total);
+		ep_data->total = 0;
+	}
+
+	udc_dwc3_push_trb(dev, ep_data, buf, ctrl);
+	udc_dwc3_depcmd_update_xfer(dev, ep_data);
+
+	return 0;
+}
 static int udc_dwc3_trb_bulk(const struct device *const dev,
 			     struct udc_dwc3_ep_data *const ep_data,
 			     struct net_buf *const buf)
@@ -1428,6 +1488,44 @@ static void udc_dwc3_on_ctrl_out(const struct device *const dev)
 static void udc_dwc3_on_xfer_not_ready(const struct device *const dev,
 				       const uint32_t evt)
 {
+	const mm_reg_t base = DEVICE_MMIO_NAMED_GET(dev, base);
+	const struct udc_dwc3_config *const cfg = dev->config;
+	const int epn = FIELD_GET(UDC_DWC3_DEPEVT_EPN_MASK, evt);
+	struct udc_dwc3_ep_data *const ep_data =
+		(epn & 1) ? &cfg->ep_data_in[epn >> 1] : &cfg->ep_data_out[epn >> 1];
+
+
+	// XferNotActive due to not having started the ISOC transfer
+	if(!(evt & UDC_DWC3_DEPEVT_NOTREADY_REASON)) {
+		uint16_t isoc_microframe_num;
+		uint32_t reg;
+		isoc_microframe_num = FIELD_GET(UDC_DWC3_DEPEVT_MICROFRAME_NUM, evt);
+
+		uint32_t cmd_param  = FIELD_PREP(UDC_DWC3_DEPCMD_STARTMICROFRAMNUM_MASK,
+				ep_data->cfg.interval * isoc_microframe_num);
+
+		sys_write32(cmd_param, base + UDC_DWC3_DEPCMD(epn));
+
+		/* Make sure the device is in U0 state, assuming TX FIFO is empty */
+		reg = sys_read32(base + UDC_DWC3_DCTL);
+		reg &= ~UDC_DWC3_DCTL_ULSTCHNGREQ_MASK;
+		reg |= UDC_DWC3_DCTL_ULSTCHNGREQ_REMOTEWAKEUP;
+		sys_write32(reg, base + UDC_DWC3_DCTL);
+
+		sys_write32(HI32((uintptr_t)ep_data->trb_buf),
+				base + UDC_DWC3_DEPCMDPAR0(ep_data->epn));
+		sys_write32(LO32((uintptr_t)ep_data->trb_buf),
+				base + UDC_DWC3_DEPCMDPAR1(ep_data->epn));
+
+		udc_dwc3_depcmd(dev, UDC_DWC3_DEPCMD(ep_data->epn),
+					UDC_DWC3_DEPCMD_DEPSTRTXFER);
+
+		LOG_DBG("DepStartXfer done ep=0x%02x xferrscidx=0x%x",
+				ep_data->cfg.addr, ep_data->xferrscidx);
+	}
+
+
+
 	switch (evt & UDC_DWC3_DEPEVT_STATUS_B3_MASK) {
 	case UDC_DWC3_DEPEVT_STATUS_B3_CONTROL_SETUP:
 		LOG_DBG("UDC_DWC3_DEPEVT_XFERNOTREADY_CONTROL_SETUP");
@@ -1439,6 +1537,8 @@ static void udc_dwc3_on_xfer_not_ready(const struct device *const dev,
 		LOG_DBG("UDC_DWC3_DEPEVT_XFERNOTREADY_CONTROL_STATUS");
 		break;
 	}
+
+
 }
 
 static void udc_dwc3_on_xfer_done(const struct device *const dev,
@@ -1549,6 +1649,19 @@ static void udc_dwc3_handle_event(const struct device *const dev, const uint32_t
 		break;
 	case UDC_DWC3_DEVT_CMDCMPLT:
 		LOG_DBG("DEVT_CMDCMPLT");
+		// check if ISOC start failed
+		// Issue end transfer and wait for not ready event again
+		if(evt & BIT(13))
+		{
+			const struct udc_dwc3_config *const cfg = dev->config;
+			const int epn = FIELD_GET(UDC_DWC3_DEPEVT_EPN_MASK, evt);
+			struct udc_dwc3_ep_data *const ep_data =
+				(epn & 1) ? &cfg->ep_data_in[epn >> 1] :
+				&cfg->ep_data_out[epn >> 1];
+
+			udc_dwc3_depcmd_end_xfer(dev, ep_data, UDC_DWC3_DEPCMD_HIPRI_FORCERM);
+
+		}
 		break;
 	case UDC_DWC3_DEVT_VNDRDEVTSTRCVED:
 		LOG_DBG("DEVT_VNDRDEVTSTRCVED");
@@ -1781,10 +1894,25 @@ static int udc_dwc3_ep_enable(const struct device *const dev,
 
 	if (USB_EP_GET_IDX(ep_data->cfg.addr) > 0) {
 		/** Check if this EP is ISO */
-		if((cfg.attributes & USB_EP_TRANSFER_TYPE_MASK) == USB_EP_TYPE_ISO) {
+		if((ep_data->cfg.attributes & USB_EP_TRANSFER_TYPE_MASK) == USB_EP_TYPE_ISO) {
+			/* Endpoint setup for ISOC */
+			uint32_t param1 = 0;
+			uint32_t param0 = 0;
+
+			param1 = FIELD_PREP(UDC_DWC3_DEPCMDPAR1_DEPCFG_BINTERVAL_MASK,
+					(ep_data->cfg.interval - 1));
+
+			param0 = FIELD_PREP(UDC_DWC3_DEPCMDPAR0_DEPCFG_MPS_MASK, ep_data->cfg.mps);
+
+			sys_write32(param0, base + UDC_DWC3_DEPCMDPAR0(ep_data->epn));
+			sys_write32(param1, base + UDC_DWC3_DEPCMDPAR1(ep_data->epn));
+
+
+			/* TRB setup for ISOC*/
 			udc_dwc3_trb_iso_init(dev, ep_data);
+		} else {
+			udc_dwc3_trb_norm_init(dev, ep_data);
 		}
-		udc_dwc3_trb_norm_init(dev, ep_data);
 	}
 
 	/* Starting from here, the endpoint can be used */
@@ -1884,10 +2012,19 @@ static void udc_dwc3_ep_worker(struct k_work *const work)
 	while ((buf = udc_buf_peek(&ep_data->cfg)) != NULL) {
 		LOG_INF("Processing buffer %p from queue", (void *)buf);
 
-		ret = udc_dwc3_trb_bulk(dev, ep_data, buf);
-		if (ret != 0) {
-			LOG_DBG("abort: No more room for buffer");
-			break;
+		if((ep_data->cfg.attributes & USB_EP_TRANSFER_TYPE_MASK) == USB_EP_TYPE_ISO) {
+			ret = udc_dwc3_trb_iso(dev, ep_data, buf);
+			if (ret != 0) {
+				LOG_DBG("abort: No more room for buffer");
+				break;
+			}
+
+		} else  {
+			ret = udc_dwc3_trb_bulk(dev, ep_data, buf);
+			if (ret != 0) {
+				LOG_DBG("abort: No more room for buffer");
+				break;
+			}
 		}
 
 		LOG_DBG("success: Buffer enqueued");
