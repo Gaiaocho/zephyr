@@ -2018,7 +2018,6 @@ static void udc_dwc3_ep_worker(struct k_work *const work)
 				LOG_DBG("abort: No more room for buffer");
 				break;
 			}
-
 		} else  {
 			ret = udc_dwc3_trb_bulk(dev, ep_data, buf);
 			if (ret != 0) {
