@@ -568,7 +568,7 @@ struct udc_dwc3_vendor_quirks {
 #define UDC_DWC3_QUIRK_DATA(dev) (((const struct udc_dwc3_config *)(dev->config))->quirk_data)
 
 #if DT_HAS_COMPAT_STATUS_OKAY(snps_dwc3 /* <- replace with your more specific compatible */)
-#include "udc_dwc3_qemu.h"
+#include "udc_dwc3_lattice_usb23.h"
 #endif
 
 /* Wrapper functions that fallback to returning 0 if no quirk is needed */
