@@ -1494,7 +1494,6 @@ static void udc_dwc3_on_xfer_not_ready(const struct device *const dev,
 	struct udc_dwc3_ep_data *const ep_data =
 		(epn & 1) ? &cfg->ep_data_in[epn >> 1] : &cfg->ep_data_out[epn >> 1];
 
-
 	// XferNotActive due to not having started the ISOC transfer
 	if(!(evt & UDC_DWC3_DEPEVT_NOTREADY_REASON)) {
 		uint16_t isoc_microframe_num;
@@ -1537,8 +1536,6 @@ static void udc_dwc3_on_xfer_not_ready(const struct device *const dev,
 		LOG_DBG("UDC_DWC3_DEPEVT_XFERNOTREADY_CONTROL_STATUS");
 		break;
 	}
-
-
 }
 
 static void udc_dwc3_on_xfer_done(const struct device *const dev,
