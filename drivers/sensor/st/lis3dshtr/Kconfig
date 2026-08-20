@@ -11,4 +11,11 @@ config LIS3DSHTR
 	  with a temperature sensor.
 
 
+config LISDSHTR_INIT_PRIORITY
+	int "SC18IS606 SPI init priority"
+	default 199
+	help
+	  SC18IS606 SPI controller initialization priority
+
+	  Note: Has to be greater than the I2C initialization priority.
 

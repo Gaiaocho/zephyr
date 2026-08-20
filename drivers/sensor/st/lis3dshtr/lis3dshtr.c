@@ -167,16 +167,16 @@ static int st_lis3dshtr_init(const struct device *dev)
 #define SENSOR_LIS3DSHTR_DEFINE(inst)							\
 	static struct st_lis3dshtr_data lis3dshtr_data_##inst;				\
 	static struct st_lis3dshtr_config lis3dshtr_config_##inst = {			\
-		.spi_controller  = SPI_DT_SPEC_INST_GET(inst, SPI_WORD_SET(8), 0),	\
+		.spi_controller  = SPI_DT_SPEC_INST_GET(inst, SPI_WORD_SET(8)),		\
 	};										\
 											\
 	SENSOR_DEVICE_DT_INST_DEFINE(inst,						\
-				     st_lis3dshtr_init,				\
+				     st_lis3dshtr_init,					\
 				     NULL,						\
 				     &lis3dshtr_data_##inst,				\
 				     &lis3dshtr_config_##inst,				\
 				     POST_KERNEL,					\
-				     CONFIG_SENSOR_INIT_PRIORITY,			\
+				     CONFIG_LISDSHTR_INIT_PRIORITY,			\
 				     &st_lis3dshtr_api);
 
 DT_INST_FOREACH_STATUS_OKAY(SENSOR_LIS3DSHTR_DEFINE)
