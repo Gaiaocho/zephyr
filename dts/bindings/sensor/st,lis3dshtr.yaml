@@ -1,0 +1,9 @@
+# Copyright (c) 2025 gaiaochos.com
+# SPDX-License-Identifier: Apache 2.0
+
+description: |
+  STMicroelectronics LIS3DSHTR 3-axis accelerometer accessed via SPI
+
+compatible: "st,lis3dshtr"
+
+include: [sensor-device.yaml, spi-device.yaml]
