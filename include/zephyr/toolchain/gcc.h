@@ -330,7 +330,6 @@ do {                                                                    \
 #define HAS_BUILTIN___builtin_add_overflow 1
 #define HAS_BUILTIN___builtin_sub_overflow 1
 #define HAS_BUILTIN___builtin_mul_overflow 1
-#define HAS_BUILTIN___builtin_div_overflow 1
 #endif
 #if TOOLCHAIN_GCC_VERSION >= 40800
 #define HAS_BUILTIN___builtin_bswap16 1
@@ -352,6 +351,16 @@ do {                                                                    \
  * Be *very* careful with these. You cannot filter out __DEPRECATED_MACRO with
  * -wno-deprecated, which has implications for -Werror.
  */
+
+/**
+ * @brief Request the compiler to fully unroll a loop up to @p n iterations.
+ *
+ * @param n Maximum iteration count (must be a literal integer).
+ */
+#ifndef TOOLCHAIN_PRAGMA_UNROLL
+#define _TOOLCHAIN_PRAGMA_UNROLL(x) _Pragma(#x)
+#define TOOLCHAIN_PRAGMA_UNROLL(n) _TOOLCHAIN_PRAGMA_UNROLL(GCC unroll n)
+#endif
 
 /*
  * Expands to nothing and generates a warning. Used like

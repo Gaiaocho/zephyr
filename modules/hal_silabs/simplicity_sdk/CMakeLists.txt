@@ -128,8 +128,18 @@ if(CONFIG_SOC_GECKO_HAS_RADIO)
         endif()
       endif()
       set(PHY_DIR ${RADIO_DIR}/rail_lib/plugin/sl_rail_util_built_in_phys/efr32xg${SILABS_DEVICE_FAMILY_NUMBER})
-      zephyr_library_sources_ifdef(CONFIG_BT_SILABS_EFR32 ${PHY_DIR}/sl_rail_ble_config${phy_suffix}.c)
-      zephyr_library_sources_ifdef(CONFIG_IEEE802154_SILABS_EFR32 ${PHY_DIR}/sl_rail_ieee802154_config${phy_suffix}.c)
+
+      # sl_rail_util_built_in_phys.c provides strong definitions of the PHY pointers for
+      # every protocol the device supports, overriding the weak fallbacks in the RAIL
+      # library. Core RAIL objects reference those pointers regardless of which protocol
+      # is enabled, so the configuration of every supported protocol must be compiled,
+      # including protocols Zephyr has no support for. Unused configurations are
+      # discarded by the linker.
+      foreach(phy ble ieee802154 zwave sidewalk rfsense_ook)
+        if(EXISTS ${PHY_DIR}/sl_rail_${phy}_config${phy_suffix}.c)
+          zephyr_library_sources(${PHY_DIR}/sl_rail_${phy}_config${phy_suffix}.c)
+        endif()
+      endforeach()
     endif()
 
     # PA curve for the modules comes from their config archive - omit the compilation of the SoC curves on modules
@@ -182,7 +192,7 @@ if(CONFIG_SOC_GECKO_HAS_RADIO)
   endif()
 
   if(CONFIG_IEEE802154_SILABS_EFR32 AND NOT CONFIG_BUILD_ONLY_NO_BLOBS)
-    set(SL_OPENTHREAD_PAL_PREBUILT protocol/openthread/build/gcc/cortex-m33/cmake/sl-openthread-library/Release/libsl_openthread.a)
+    set(SL_OPENTHREAD_PAL_PREBUILT protocol/openthread/build/gcc/cortex-m33/sl-openthread-library/Release/libsl_openthread.a)
     if(NOT EXISTS "${BLOBS_DIR}/${SL_OPENTHREAD_PAL_PREBUILT}")
       message(FATAL_ERROR
         "IEEE802154_SILABS_EFR32 requires the OpenThread PAL prebuilt library at:\n"
@@ -341,7 +351,12 @@ if(CONFIG_SILABS_SISDK_CORE)
     SL_CODE_COMPONENT_CORE=core
   )
 endif()
-zephyr_library_sources_ifdef(CONFIG_SILABS_SISDK_ACMP      ${EMLIB_DIR}/src/em_acmp.c)
+
+if(CONFIG_SILABS_SISDK_ACMP)
+  zephyr_library_sources_ifdef(CONFIG_SOC_FAMILY_SILABS_S2  ${EMLIB_DIR}/src/em_acmp.c)
+  zephyr_library_sources(${PERIPHERAL_DIR}/src/sl_hal_acmp.c)
+endif()
+
 zephyr_library_sources_ifdef(CONFIG_SILABS_SISDK_EMU       ${EMLIB_DIR}/src/em_emu.c)
 if(CONFIG_SILABS_SISDK_GPIO)
   zephyr_library_sources_ifdef(CONFIG_SOC_FAMILY_SILABS_S2  ${EMLIB_DIR}/src/em_gpio.c)
@@ -385,20 +400,30 @@ zephyr_library_sources_ifdef(CONFIG_SILABS_SISDK_TIMER
   ${EMLIB_DIR}/src/em_timer.c
 )
 
-zephyr_library_sources_ifdef(CONFIG_SILABS_SISDK_LDMA
-  ${SERVICE_DIR}/dma_manager/src/sl_dma_manager.c
-  ${SERVICE_DIR}/dma_manager/src/sl_dma_manager_hal_ldma.c
-  ${PERIPHERAL_DIR}/src/sl_hal_ldma.c
-  ${EMLIB_DIR}/src/em_ldma.c
-)
+if(CONFIG_SILABS_SISDK_LDMA)
+  zephyr_library_sources_ifdef(CONFIG_SOC_FAMILY_SILABS_S2  ${EMLIB_DIR}/src/em_ldma.c)
+  zephyr_library_sources(
+    ${SERVICE_DIR}/dma_manager/src/sl_dma_manager.c
+    ${SERVICE_DIR}/dma_manager/src/sl_dma_manager_hal_ldma.c
+    ${PERIPHERAL_DIR}/src/sl_hal_ldma.c
+  )
+endif()
 
 zephyr_library_sources_ifdef(CONFIG_SILABS_SISDK_MSC       ${EMLIB_DIR}/src/em_msc.c)
-zephyr_library_sources_ifdef(CONFIG_SILABS_SISDK_PRS       ${EMLIB_DIR}/src/em_prs.c)
 zephyr_library_sources_ifdef(CONFIG_SILABS_SISDK_RMU       ${EMLIB_DIR}/src/em_rmu.c)
 zephyr_library_sources_ifdef(CONFIG_SILABS_SISDK_RTCC      ${EMLIB_DIR}/src/em_rtcc.c)
-zephyr_library_sources_ifdef(CONFIG_SILABS_SISDK_EUSART    ${EMLIB_DIR}/src/em_eusart.c)
 zephyr_library_sources_ifdef(CONFIG_SILABS_SISDK_USART     ${EMLIB_DIR}/src/em_usart.c)
 zephyr_library_sources_ifdef(CONFIG_SILABS_SISDK_WDOG      ${EMLIB_DIR}/src/em_wdog.c)
+
+if(CONFIG_SILABS_SISDK_EUSART)
+  zephyr_library_sources_ifdef(CONFIG_SOC_FAMILY_SILABS_S2  ${EMLIB_DIR}/src/em_eusart.c)
+  zephyr_library_sources(${PERIPHERAL_DIR}/src/sl_hal_eusart.c)
+endif()
+
+if(CONFIG_SILABS_SISDK_PRS)
+  zephyr_library_sources_ifdef(CONFIG_SOC_FAMILY_SILABS_S2  ${EMLIB_DIR}/src/em_prs.c)
+  zephyr_library_sources(${PERIPHERAL_DIR}/src/sl_hal_prs.c)
+endif()
 
 zephyr_include_directories_ifdef(CONFIG_SILABS_SISDK_SE
   ${SECURITY_DIR}/sl_component/se_manager/src

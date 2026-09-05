@@ -44,7 +44,8 @@
 			device_type = "cpu";
 			clocks = <&hfpll>;
 			riscv,isa-base = "rv32e";
-			riscv,isa-extensions = "e", "m", "c", "zicsr";
+			riscv,isa-extensions = "e", "m", "c", "zicsr",
+					       "zba", "zbb", "zbc", "zbs", "zcb";
 			nordic,bus-width = <32>;
 		};
 	};
@@ -198,6 +199,7 @@
 				ngpios = <11>;
 				status = "disabled";
 				port = <2>;
+				hspadctrl-supported;
 			};
 
 			timer00: timer@55000 {
