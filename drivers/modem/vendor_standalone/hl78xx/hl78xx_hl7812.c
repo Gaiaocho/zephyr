@@ -40,6 +40,23 @@ static void hl78xx_hl7812_on_kstatev_urc(struct hl78xx_data *data, int state_val
 	hl78xx_on_kstatev_parser(data, state_value, rat_mode);
 #endif /* CONFIG_MODEM_HL78XX_LOG_CONTEXT_VERBOSE_DEBUG */
 
+	/* NB-NTN runs the NB-IoT protocol stack, and +KSTATEV reports the
+	 * stack's technology, not the +KSRAT selection: while KSRAT is 3
+	 * (NB-NTN) the URC says 1 (NB-IoT). Overwriting the cached RAT with
+	 * that value made the driver announce a switch to terrestrial NB-IoT
+	 * moments after AT+KSRAT? read back 3, and the application tore down
+	 * and re-applied its whole NTN configuration in response. A genuine
+	 * departure from NB-NTN cannot happen behind our back (it requires a
+	 * KSRAT write; the NTN flows keep Auto-RAT disabled with a cleared
+	 * PRL) and always flows through an AT+KSRAT? readback, which remains
+	 * the authoritative source.
+	 */
+	if ((rat_mode == (int)HL78XX_RAT_NB1) &&
+	    (data->status.registration.rat_mode == HL78XX_RAT_NBNTN)) {
+		LOG_DBG("KSTATEV reported NB-IoT while NB-NTN is selected; keeping NB-NTN");
+		return;
+	}
+
 	if (rat_mode != data->status.registration.rat_mode) {
 		data->status.registration.rat_mode = rat_mode;
 		event.content.rat_mode = data->status.registration.rat_mode;
@@ -160,13 +177,6 @@ static bool hl78xx_hl7812_cfg_skip_band_for_rat(struct hl78xx_data *data,
 }
 
 #ifdef CONFIG_HL78XX_GNSS
-static bool hl78xx_hl7812_carrier_on_gnss_pending(struct hl78xx_data *data)
-{
-	LOG_INF("Processing pending GNSS mode request (queued before modem ready)");
-	hl78xx_enter_state(data, MODEM_HL78XX_STATE_RUN_GNSS_INIT_SCRIPT);
-	return true;
-}
-
 static bool hl78xx_hl7812_on_gnss_mode_enter_lpm(struct hl78xx_data *data)
 {
 	ARG_UNUSED(data);
@@ -182,12 +192,6 @@ static bool hl78xx_hl7812_on_gnss_mode_enter_lpm(struct hl78xx_data *data)
 	return true;
 }
 #else
-static bool hl78xx_hl7812_carrier_on_gnss_pending(struct hl78xx_data *data)
-{
-	ARG_UNUSED(data);
-	return false;
-}
-
 static bool hl78xx_hl7812_on_gnss_mode_enter_lpm(struct hl78xx_data *data)
 {
 	ARG_UNUSED(data);
@@ -196,9 +200,6 @@ static bool hl78xx_hl7812_on_gnss_mode_enter_lpm(struct hl78xx_data *data)
 #endif /* CONFIG_HL78XX_GNSS */
 
 #ifdef CONFIG_MODEM_HL78XX_LOW_POWER_MODE
-
-/* Defined in hl78xx_sockets.c */
-extern void hl78xx_invalidate_socket_contexts(struct hl78xx_data *data);
 
 /* -------------------------------------------------------------------------
  * GPIO6 handler
@@ -382,6 +383,10 @@ static void hl78xx_hl7812_on_ksup_lpm(struct hl78xx_data *data)
 	 */
 	LOG_DBG("Modem restart detected");
 	hl78xx_invalidate_socket_contexts(data);
+	hl78xx_reset_modem_session_state(data);
+#ifdef CONFIG_HL78XX_GNSS
+	hl78xx_gnss_reset_session_state(data);
+#endif /* CONFIG_HL78XX_GNSS */
 	hl78xx_delegate_event(data, MODEM_HL78XX_EVENT_MDM_RESTART);
 }
 
@@ -599,6 +604,5 @@ const struct hl78xx_variant_ops hl78xx_variant_ops_hl7812 = {
 	.on_registered_ready = NULL,
 	.on_kcellmeas_ready = hl78xx_hl7812_on_kcellmeas_ready,
 #endif /* CONFIG_MODEM_HL78XX_LOW_POWER_MODE */
-	.carrier_on_gnss_pending = hl78xx_hl7812_carrier_on_gnss_pending,
 	.on_gnss_mode_enter_lpm = hl78xx_hl7812_on_gnss_mode_enter_lpm,
 };

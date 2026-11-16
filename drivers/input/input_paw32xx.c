@@ -223,7 +223,7 @@ static void paw32xx_motion_work_handler(struct k_work *work)
 
 	/* Trigger one more scan if more data is available. */
 	if (gpio_pin_get_dt(&cfg->motion_gpio)) {
-		k_work_submit(&data->motion_work);
+		input_work_submit(&data->motion_work);
 	}
 }
 
@@ -234,7 +234,7 @@ static void paw32xx_motion_handler(const struct device *gpio_dev,
 	struct paw32xx_data *data = CONTAINER_OF(
 			cb, struct paw32xx_data, motion_cb);
 
-	k_work_submit(&data->motion_work);
+	input_work_submit(&data->motion_work);
 }
 
 int paw32xx_set_resolution(const struct device *dev, uint16_t res_cpi)
@@ -439,7 +439,7 @@ static int paw32xx_pm_action(const struct device *dev,
 }
 #endif
 
-#define PAW32XX_SPI_MODE (SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | \
+#define PAW32XX_SPI_MODE (SPI_OP_MODE_CONTROLLER | SPI_WORD_SET(8) | \
 			  SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_TRANSFER_MSB)
 
 #define PAW32XX_INIT(n)								\

@@ -104,13 +104,20 @@ struct spi_nand_data {
 LOG_MODULE_REGISTER(spi_nand, CONFIG_FLASH_LOG_LEVEL);
 
 /* Everything necessary to acquire owning access to the device. */
-static void acquire_device(const struct device *dev)
+static int acquire_device(const struct device *dev)
 {
 	const struct spi_nand_config *config = dev->config;
 	struct spi_nand_data *const data = dev->data;
+	int ret;
 
 	k_sem_take(&data->sem, K_FOREVER);
-	(void)pm_device_runtime_get(config->spi.bus);
+	ret = pm_device_runtime_get(config->spi.bus);
+	if (ret != 0) {
+		LOG_ERR_PM_DEVICE_RUNTIME_GET(config->spi.bus, ret);
+		k_sem_give(&data->sem);
+	}
+
+	return ret;
 }
 
 /* Everything necessary to release access to the device. */
@@ -423,7 +430,7 @@ static int spi_nand_read(const struct device *dev, off_t addr, void *dest, size_
 	uint16_t page_offset;
 	uint16_t bytes_to_end;
 	uint16_t bytes_to_read;
-	int ret = 0;
+	int ret;
 
 	if (size == 0) {
 		/* No work to do */
@@ -435,7 +442,10 @@ static int spi_nand_read(const struct device *dev, off_t addr, void *dest, size_
 		return -EINVAL;
 	}
 
-	acquire_device(dev);
+	ret = acquire_device(dev);
+	if (ret != 0) {
+		return ret;
+	}
 
 	while (size > 0) {
 		page_address = addr >> config->addr_page_shift;
@@ -481,7 +491,7 @@ static int spi_nand_write(const struct device *dev, off_t addr, const void *src,
 						    : 0;
 	uint32_t page_address;
 	uint8_t status;
-	int ret = 0;
+	int ret;
 
 	if (size == 0) {
 		/* No work to do */
@@ -501,7 +511,10 @@ static int spi_nand_write(const struct device *dev, off_t addr, const void *src,
 		return -EINVAL;
 	}
 
-	acquire_device(dev);
+	ret = acquire_device(dev);
+	if (ret != 0) {
+		return ret;
+	}
 
 	while (size > 0) {
 		/* Enable write operation */
@@ -557,7 +570,7 @@ static int spi_nand_erase(const struct device *dev, off_t addr, size_t size)
 	const struct spi_nand_config *config = dev->config;
 	uint32_t page_address;
 	uint8_t status;
-	int ret = 0;
+	int ret;
 
 	if (size == 0) {
 		/* No work to do */
@@ -577,7 +590,10 @@ static int spi_nand_erase(const struct device *dev, off_t addr, size_t size)
 		return -EINVAL;
 	}
 
-	acquire_device(dev);
+	ret = acquire_device(dev);
+	if (ret != 0) {
+		return ret;
+	}
 
 	while (size > 0) {
 		/* Enable write (erase) operation */
@@ -830,7 +846,10 @@ static int spi_nand_ex_op(const struct device *dev, uint16_t code, const uintptr
 {
 	int ret;
 
-	acquire_device(dev);
+	ret = acquire_device(dev);
+	if (ret != 0) {
+		return ret;
+	}
 
 	switch (code) {
 	case FLASH_EX_OP_RESET:
@@ -937,14 +956,14 @@ static int onfi_parameters_load(const struct device *dev)
 		}
 		computed_crc =
 			crc16(CRC16_POLY, 0x4F4E, (void *)&onfi, sizeof(onfi) - sizeof(uint16_t));
-		if (computed_crc == onfi.integrity_crc) {
+		if (computed_crc == sys_le16_to_cpu(onfi.integrity_crc)) {
 			LOG_DBG("Valid CRC: %04X", computed_crc);
 			break;
 		}
 		LOG_DBG("Parameters at offset %u corrupt (%04X != %04X)", i, computed_crc,
-			onfi.integrity_crc);
+			sys_le16_to_cpu(onfi.integrity_crc));
 	}
-	if (computed_crc != onfi.integrity_crc) {
+	if (computed_crc != sys_le16_to_cpu(onfi.integrity_crc)) {
 		LOG_ERR("No valid ONFI parameters blocks found");
 		return -ENOSPC;
 	}
@@ -955,19 +974,21 @@ static int onfi_parameters_load(const struct device *dev)
 	 */
 	LOG_DBG("      Manufacturer: %.12s", onfi.device_manufacturer);
 	LOG_DBG("             Model: %.20s", onfi.device_model);
-	LOG_DBG("  Page Size (data): %d", onfi.data_bytes_per_page);
-	LOG_DBG(" Page Size (spare): %d", onfi.spare_bytes_per_page);
-	LOG_DBG("   Pages per Block: %d", onfi.pages_per_block);
-	LOG_DBG("   Blocks per Unit: %d", onfi.blocks_per_lun);
+	LOG_DBG("  Page Size (data): %d", sys_le32_to_cpu(onfi.data_bytes_per_page));
+	LOG_DBG(" Page Size (spare): %d", sys_le16_to_cpu(onfi.spare_bytes_per_page));
+	LOG_DBG("   Pages per Block: %d", sys_le32_to_cpu(onfi.pages_per_block));
+	LOG_DBG("   Blocks per Unit: %d", sys_le32_to_cpu(onfi.blocks_per_lun));
 	LOG_DBG("             Units: %d", onfi.num_lun);
 	LOG_DBG("Plane Address Bits: %d", onfi.plane_address_bits);
 
 	/* Validate ONFI data against devicetree */
-	block_size = onfi.data_bytes_per_page * onfi.pages_per_block;
-	total_size = block_size * onfi.blocks_per_lun * onfi.num_lun;
-	if (onfi.data_bytes_per_page != config->parameters->write_block_size) {
+	block_size = sys_le32_to_cpu(onfi.data_bytes_per_page) *
+		     sys_le32_to_cpu(onfi.pages_per_block);
+	total_size = block_size * sys_le32_to_cpu(onfi.blocks_per_lun) * onfi.num_lun;
+	if (sys_le32_to_cpu(onfi.data_bytes_per_page) != config->parameters->write_block_size) {
 		LOG_WRN("Devicetree page size does not match ONFI page size (%d != %d)",
-			onfi.data_bytes_per_page, config->parameters->write_block_size);
+			sys_le32_to_cpu(onfi.data_bytes_per_page),
+			config->parameters->write_block_size);
 	}
 	if (block_size != config->block_size) {
 		LOG_WRN("Devicetree block size does not match ONFI block size (%d != %d)",
@@ -1006,7 +1027,10 @@ static int spi_nand_configure(const struct device *dev)
 		return -ENODEV;
 	}
 
-	acquire_device(dev);
+	ret = acquire_device(dev);
+	if (ret != 0) {
+		return ret;
+	}
 
 	/* Soft RESET chip and wait until ready again */
 	ret = spi_nand_reset(dev);

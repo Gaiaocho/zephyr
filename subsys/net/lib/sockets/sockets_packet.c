@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2019 Intel Corporation
  * Copyright (c) 2021 Nordic Semiconductor
- * Copyright (c) 2026 Philipp Steiner <philipp.steiner1987@gmail.com>
+ * Copyright (c) 2026 Philipp Steiner
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -720,14 +720,6 @@ static int mcast_membership_add(struct net_context *ctx, struct net_if *iface,
 
 	ret = mcast_membership_l2(iface, addr, true);
 	if (ret < 0) {
-		/* The group was not joined, so give the entry back. The L2 is
-		 * told to leave the group as well, as it takes the address
-		 * into use before it programs it and keeps it if the device
-		 * refuses. Leaving a group that was never joined is harmless,
-		 * it just fails with -ENOENT.
-		 */
-		(void)mcast_membership_l2(iface, addr, false);
-
 		k_mutex_lock(&mcast_lock, K_FOREVER);
 
 		if (free_entry->ctx == ctx &&
@@ -934,6 +926,18 @@ static ssize_t packet_sock_write_vmeth(void *obj, const void *buffer,
 	return zpacket_sendto_ctx(obj, buffer, count, 0, NULL, 0);
 }
 
+static int packet_sock_poll_prepare_vmeth(void *obj, struct zvfs_pollfd *pfd,
+					  struct k_poll_event **pev, struct k_poll_event *pev_end)
+{
+	return sock_fd_op_vtable.fd_vtable.poll_prepare(obj, pfd, pev, pev_end);
+}
+
+static int packet_sock_poll_update_vmeth(void *obj, struct zvfs_pollfd *pfd,
+					 struct k_poll_event **pev)
+{
+	return sock_fd_op_vtable.fd_vtable.poll_update(obj, pfd, pev);
+}
+
 static int packet_sock_ioctl_vmeth(void *obj, unsigned int request,
 				   va_list args)
 {
@@ -1023,6 +1027,8 @@ static const struct fd_op_vtable packet_sock_fd_vtable = {
 	.write = packet_sock_write_vmeth,
 	.close2 = packet_sock_close2_vmeth,
 	.ioctl = packet_sock_ioctl_vmeth,
+	.poll_prepare = packet_sock_poll_prepare_vmeth,
+	.poll_update = packet_sock_poll_update_vmeth,
 };
 
 static const struct socket_op_vtable packet_sock_fd_op_vtable = {

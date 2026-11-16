@@ -54,10 +54,11 @@ static int icm40627_set_accel_fs(const struct device *dev, uint16_t fs)
 
 	sensor_g_to_ms2(round_fs, &accel_fs_value);
 	data->accel_fs = accel_fs_value.val1;
-	data->accel_sensitivity_shift = MIN_ACCEL_SENS_SHIFT;
+	/* BIT_ACCEL_UI_FS_16/8/4/2 are 0..3, so the shift is 11/12/13/14 */
+	data->accel_sensitivity_shift = MIN_ACCEL_SENS_SHIFT + temp;
 
 	return cfg->bus_io->update(&cfg->bus, REG_ACCEL_CONFIG0, (uint8_t)MASK_ACCEL_UI_FS_SEL,
-				   temp);
+				   (uint8_t)FIELD_PREP(MASK_ACCEL_UI_FS_SEL, temp));
 }
 
 static int icm40627_set_gyro_fs(const struct device *dev, uint16_t fs)
@@ -103,7 +104,8 @@ static int icm40627_set_gyro_fs(const struct device *dev, uint16_t fs)
 	data->gyro_fs = gyro_fs_value.val1;
 	data->gyro_sensitivity_x10 = icm40627_gyro_sensitivity_x10[temp];
 
-	return cfg->bus_io->update(&cfg->bus, REG_GYRO_CONFIG0, (uint8_t)MASK_GYRO_UI_FS_SEL, temp);
+	return cfg->bus_io->update(&cfg->bus, REG_GYRO_CONFIG0, (uint8_t)MASK_GYRO_UI_FS_SEL,
+				   (uint8_t)FIELD_PREP(MASK_GYRO_UI_FS_SEL, temp));
 }
 
 static int icm40627_set_accel_odr(const struct device *dev, uint16_t rate)
@@ -234,9 +236,9 @@ static int icm40627_sensor_init(const struct device *dev)
 	/* wait for soft reset to take effect */
 	k_msleep(SOFT_RESET_TIME_MS);
 
-	/* always use internal RC oscillator */
-	res = cfg->bus_io->write(&cfg->bus, REG_INTF_CONFIG1,
-				 (uint8_t)FIELD_PREP(MASK_CLKSEL, BIT_CLKSEL_INT_RC));
+	/* always use internal RC oscillator, keep the reserved bits at their reset value */
+	res = cfg->bus_io->update(&cfg->bus, REG_INTF_CONFIG1, (uint8_t)MASK_CLKSEL,
+				  (uint8_t)FIELD_PREP(MASK_CLKSEL, BIT_CLKSEL_INT_RC));
 
 	if (res) {
 		LOG_ERR("write REG_INTF_CONFIG1 failed");
@@ -350,8 +352,13 @@ static void icm40627_convert_gyro(struct sensor_value *val, int16_t raw_val,
 static inline void icm40627_convert_temp(struct sensor_value *val, int16_t raw_val)
 {
 	/* see datasheet section 14.6 for details */
-	val->val1 = (((int64_t)raw_val * 100) / 13248) + 25;
-	val->val2 = ((((int64_t)raw_val * 100) % 13248) * 1000000) / 13248;
+	int32_t temperature = raw_val * 100;
+	int32_t whole = temperature / 13248 + 25;
+	int32_t remainder = temperature % 13248;
+
+	/* 1000000 / 13248 = 15625 / 207 */
+	val->val1 = whole;
+	val->val2 = remainder * 15625 / 207;
 
 	if (val->val2 < 0) {
 		val->val1--;

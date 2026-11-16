@@ -51,6 +51,21 @@ extern "C" {
 #define I3C_OD_FIRST_BC_THIGH_MIN_NS  200
 
 /**
+ * @brief Minimum pure-bus tCAS in picoseconds (MIPI Table 49: 38.4 ns).
+ */
+#define I3C_BUS_TCAS_MIN_PS 38400U
+
+/**
+ * @brief Maximum pure-bus tCAS in picoseconds (MIPI Table 49: 1 us).
+ */
+#define I3C_BUS_TCAS_MAX_PS 1000000U
+
+/**
+ * @brief First-broadcast tCAS floor in picoseconds (tHIGH_INIT, 200 ns).
+ */
+#define I3C_BUS_TCAS_FIRST_BC_MIN_PS 200000U
+
+/**
  * @name Bus Characteristic Register (BCR)
  * @anchor I3C_BCR
  *
@@ -347,6 +362,9 @@ enum i3c_data_rate {
 /** Skip I3C broadcast header. Private Transfers only. */
 #define I3C_MSG_NBCH			BIT(4)
 
+/** NACK is expected from target */
+#define I3C_MSG_NOACK_EXPECTED		BIT(5)
+
 /** I3C HDR Mode 0 */
 #define I3C_MSG_HDR_MODE0		BIT(0)
 
@@ -489,6 +507,28 @@ struct i3c_config_controller {
 	} scl_od_min;
 
 	/**
+	 * Requested minimum SCL Push-Pull clock periods.
+	 */
+	struct {
+		/**
+		 * Requested minimum SCL Push-Pull HIGH period in nanoseconds.
+		 *
+		 * Some speed-limited targets require a larger Push-Pull SCL
+		 * HIGH period than the bus minimum, as advertised through the
+		 * GETMXDS CCC.
+		 */
+		uint32_t high_ns;
+	} scl_pp_min;
+
+	/**
+	 * Requested tCAS in picoseconds (pure I3C bus).
+	 *
+	 * MIPI I3C Basic: 38.4 ns to 1 us (ENTAS0). Must be in
+	 * [@ref I3C_BUS_TCAS_MIN_PS, @ref I3C_BUS_TCAS_MAX_PS].
+	 */
+	uint32_t tcas_ps;
+
+	/**
 	 * Bit mask of supported HDR modes (0 - 7).
 	 *
 	 * This can be used to enable or disable HDR mode
@@ -509,6 +549,7 @@ struct i3c_config_custom {
 	/** ID of the configuration parameter. */
 	uint32_t id;
 
+	/** Value or pointer to the configuration parameter */
 	union {
 		/** Value of configuration parameter. */
 		uintptr_t val;
@@ -985,12 +1026,9 @@ struct i3c_device_id {
  * This helper macro expands to a static initializer for a i3c_device_id
  * by populating the PID (Provisioned ID) field.
  *
- * @param pid Provisioned ID.
+ * @param pid_val Provisioned ID.
  */
-#define I3C_DEVICE_ID(pid)						\
-	{								\
-		.pid = pid						\
-	}
+#define I3C_DEVICE_ID(pid_val) {.pid = pid_val}
 
 /**
  * @brief Structure describing a I3C target device.
@@ -1083,6 +1121,9 @@ struct i3c_device_desc {
 	 */
 	uint8_t dcr;
 
+	/**
+	 * Maximum data speed (GETMXDS CCC).
+	 */
 	struct {
 		/** Maximum Read Speed */
 		uint8_t maxrd;
@@ -1094,6 +1135,9 @@ struct i3c_device_desc {
 		uint32_t max_read_turnaround;
 	} data_speed;
 
+	/**
+	 * Maximum data lengths (GETMXDS CCC).
+	 */
 	struct {
 		/** Maximum Read Length */
 		uint16_t mrl;
@@ -1160,7 +1204,7 @@ struct i3c_device_desc {
 		uint8_t getcap4;
 	} getcaps;
 
-	/* Describes Controller Feature Capabilities */
+	/** Describes Controller Feature Capabilities */
 	struct {
 		/**
 		 * CRCAPS1
@@ -1251,6 +1295,9 @@ struct i3c_dev_attached_list {
 	 */
 	struct i3c_addr_slots addr_slots;
 
+	/**
+	 * Linked lists of attached I3C and I2C devices.
+	 */
 	struct {
 		/**
 		 * Linked list of attached I3C devices.
@@ -2011,6 +2058,8 @@ static inline int z_impl_i3c_do_ccc_cb(const struct device *dev,
  * @retval 0 on success.
  * @retval -EBUSY Bus is busy.
  * @retval -EIO General input / output error.
+ * @retval -ENODATA If message has flag I3C_MSG_NOACK_EXPECTED set and
+ *		    the target NACK the transfer.
  */
 __syscall int i3c_transfer(struct i3c_device_desc *target,
 			   struct i3c_msg *msgs, uint8_t num_msgs);

@@ -29,7 +29,6 @@ tests:
       - nrf54h20dk/nrf54h20/cpuapp
       - nrf54l15dk/nrf54l15/cpuapp
       - ophelia4ev/nrf54l15/cpuapp
-      - nrf9280pdk/nrf9280/cpuapp
     integration_platforms:
       - nrf52dk/nrf52810
       - nrf5340dk/nrf5340/cpuapp
@@ -47,8 +46,8 @@ tests:
       - nrf54h20dk/nrf54h20/cpuapp
       - nrf54l15dk/nrf54l15/cpuapp
       - nrf7120dk/nrf7120/cpuapp
+      - nrf7120dk/nrf7120e/cpuapp
       - ophelia4ev/nrf54l15/cpuapp
-      - nrf9280pdk/nrf9280/cpuapp
     integration_platforms:
       - nrf52dk/nrf52810
       - nrf5340dk/nrf5340/cpuapp
@@ -66,8 +65,8 @@ tests:
       - nrf54h20dk/nrf54h20/cpuapp
       - nrf54l15dk/nrf54l15/cpuapp
       - nrf7120dk/nrf7120/cpuapp
+      - nrf7120dk/nrf7120e/cpuapp
       - ophelia4ev/nrf54l15/cpuapp
-      - nrf9280pdk/nrf9280/cpuapp
     integration_platforms:
       - nrf52dk/nrf52810
       - nrf5340dk/nrf5340/cpuapp
@@ -81,8 +80,8 @@ tests:
       - nrf54h20dk/nrf54h20/cpuapp
       - nrf54l15dk/nrf54l15/cpuapp
       - nrf7120dk/nrf7120/cpuapp
+      - nrf7120dk/nrf7120e/cpuapp
       - ophelia4ev/nrf54l15/cpuapp
-      - nrf9280pdk/nrf9280/cpuapp
     integration_platforms:
       - nrf51dk/nrf51822
       - nrf54l15dk/nrf54l15/cpuapp
@@ -98,7 +97,7 @@ tests:
       - nrf54h20dk/nrf54h20/cpuapp
       - nrf54l15dk/nrf54l15/cpuapp
       - nrf7120dk/nrf7120/cpuapp
-      - nrf9280pdk/nrf9280/cpuapp
+      - nrf7120dk/nrf7120e/cpuapp
       - ophelia4ev/nrf54l15/cpuapp
     integration_platforms:
       - nrf51dk/nrf51822
@@ -130,6 +129,11 @@ tests:
       - DTC_OVERLAY_FILE="nxp_cmp/frdm_mcxc242.overlay"
     platform_allow:
       - frdm_mcxc242
+  drivers.comparator.build.nxp_lpacmp.frdm_mcxl255:
+    extra_args:
+      - DTC_OVERLAY_FILE="nxp_lpacmp/frdm_mcxl255.overlay"
+    platform_allow:
+      - frdm_mcxl255/mcxl255/cpu0
   drivers.comparator.build.renesas_lvd:
     extra_args:
       - DTC_OVERLAY_FILE="renesas_lvd/lvd.overlay"
@@ -139,6 +143,7 @@ tests:
   drivers.comparator.build.build:
     platform_allow:
       - kit_psc3m5_evk
+      - kit_psc3m6_eval/psc3m6ges3ahq1
       - kit_pse84_eval/pse846gps2dbzc4a/m33
       - kit_pse84_eval/pse846gps2dbzc4a/m55
       - kit_pse84_ai/pse846gps2dbzc4a/m33
@@ -150,3 +155,10 @@ tests:
       - CONFIG_MFD=y
     platform_allow:
       - kit_psc3m5_evk
+  drivers.comparator.build.wch_comp.ch5xx:
+    extra_args:
+      - DTC_OVERLAY_FILE="wch_comp/ch5xx.overlay"
+    platform_allow:
+      - nano_ch57x/ch570
+      - nano_ch57x/ch572
+    min_ram: 10

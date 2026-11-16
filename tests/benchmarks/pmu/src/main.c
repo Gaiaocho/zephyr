@@ -48,7 +48,7 @@ static int bench_cpu;
 static uint64_t __aligned(CACHE_LINE_SIZE) test_array[ARRAY_ELEMENTS];
 static uint32_t __aligned(CACHE_LINE_SIZE) random_indices[MEMORY_ITERATIONS];
 
-static struct pmu_counter_config counter_configs[PMU_MAX_COUNTERS];
+static struct pmu_counter_config counter_configs[CONFIG_PMU_MAX_COUNTERS];
 
 #define MEASURE_START()                                                                            \
 	pmu_counter_reset_all();                                                                   \
@@ -151,7 +151,7 @@ static void pmu_bench_suite_setup(void)
 #ifdef CONFIG_SMP
 	bench_cpu = arch_curr_cpu()->id;
 	/*
-	 * CPU mask APIs cannot pin a running thread (see test_threads_cpu_mask).
+	 * CPU mask APIs cannot pin a running thread (see test_thread_cpu_mask).
 	 * Record the boot CPU and verify it in pmu_bench_begin(); pin helper
 	 * threads to bench_cpu before k_thread_start().
 	 */

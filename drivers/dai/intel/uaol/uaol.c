@@ -20,11 +20,11 @@
 
 LOG_MODULE_REGISTER(dai_uaol_intel_adsp);
 
-#define UAOL_USB_EP_DIRECTION_OUT		0
-#define UAOL_USB_EP_DIRECTION_IN		1
-
 /* maximum payload size of PCM stream when split_ep is on */
 #define UAOL_MPS_SPLIT_EP			188
+
+#define USB_FS_FRAME_USEC			1000
+#define USB_HS_UFRAME_USEC			125
 
 /* service interval cadence of PCM stream in microseconds */
 #define UAOL_SERVICE_INTERVAL_DEFAULT		1000
@@ -54,6 +54,24 @@ static const struct device *uaol_get_hw_device(uint32_t index)
 	return uaol_devs[index];
 }
 
+static void dai_uaol_set_ep_info(struct dai_intel_uaol_data *dp,
+				 const struct ipc4_uaol_usb_ep_info *ep_info)
+{
+	/* HW pcms_ctl.part.mps is 11 bits. */
+	uint32_t packet_size = ep_info->usb_mps & 0x7FF;
+
+	dp->hw_cfg.direction = ep_info->direction;
+
+	if (ep_info->direction == UAOL_DIR_PLAYBACK && ep_info->split_ep) {
+		dp->hw_cfg.sio_credit_size = MIN(packet_size, UAOL_MPS_SPLIT_EP);
+	} else {
+		dp->hw_cfg.sio_credit_size = packet_size;
+	}
+
+	dp->hw_cfg.device_speed = ep_info->device_speed ?
+		UAOL_DEVICE_SPEED_HIGH : UAOL_DEVICE_SPEED_FULL;
+}
+
 static int dai_uaol_process_aux_config_data(struct dai_intel_uaol_data *dp,
 					    const void *data, size_t size)
 {
@@ -63,7 +81,9 @@ static int dai_uaol_process_aux_config_data(struct dai_intel_uaol_data *dp,
 	struct ipc4_uaol_config *config = NULL;
 	struct ipc4_uaol_fifo_sao *fifo_sao = NULL;
 	struct ipc4_uaol_usb_ep_info *ep_info = NULL;
+	struct ipc4_uaol_usb_ep_info *fb_ep_info = NULL;
 	struct ipc4_uaol_usb_art_divider *art_divider = NULL;
+	uint32_t *service_interval = NULL;
 
 	for (i = 0; i <= size; i += hop) {
 		if (size - i < sizeof(struct ipc4_uaol_tlv)) {
@@ -90,9 +110,17 @@ static int dai_uaol_process_aux_config_data(struct dai_intel_uaol_data *dp,
 			ep_info = (struct ipc4_uaol_usb_ep_info *)&tlv->value;
 			length = sizeof(struct ipc4_uaol_usb_ep_info);
 			break;
+		case IPC4_UAOL_AUX_CONFIG_TLV_USB_EP_FEEDBACK_INFO:
+			fb_ep_info = (struct ipc4_uaol_usb_ep_info *)&tlv->value;
+			length = sizeof(struct ipc4_uaol_usb_ep_info);
+			break;
 		case IPC4_UAOL_AUX_CONFIG_TLV_USB_ART_DIVIDER:
 			art_divider = (struct ipc4_uaol_usb_art_divider *)&tlv->value;
 			length = sizeof(struct ipc4_uaol_usb_art_divider);
+			break;
+		case IPC4_UAOL_AUX_CONFIG_TLV_SERVICE_INTERVAL:
+			service_interval = (uint32_t *)&tlv->value;
+			length = sizeof(uint32_t);
 			break;
 		default:
 			length = tlv->length;
@@ -107,12 +135,13 @@ static int dai_uaol_process_aux_config_data(struct dai_intel_uaol_data *dp,
 		tlv = (struct ipc4_uaol_tlv *)((uintptr_t)tlv + hop);
 	}
 
-	if (config) {
-		if (config->link_idx != dp->link || config->stream_idx != dp->stream) {
-			LOG_ERR("Config mismatch: this dev link, stream: %d, %d; config: %d, %d",
-				dp->link, dp->stream, config->link_idx, config->stream_idx);
-			return -EINVAL;
-		}
+	if (config && (config->link_idx != dp->link || config->stream_idx != dp->stream)) {
+		LOG_ERR("Config mismatch: this dev link, stream: %d, %d; config: %d, %d",
+			dp->link, dp->stream, config->link_idx, config->stream_idx);
+		return -EINVAL;
+	}
+	if (ep_info) {
+		dai_uaol_set_ep_info(dp, ep_info);
 	}
 	if (bdf) {
 		dp->hw_cfg.xhci_bus = bdf->bus;
@@ -127,19 +156,48 @@ static int dai_uaol_process_aux_config_data(struct dai_intel_uaol_data *dp,
 			(dp->stream == 3) ? fifo_sao->rx1_fifo_sao :
 			0;
 	}
-	if (ep_info) {
-		if (ep_info->direction == UAOL_USB_EP_DIRECTION_OUT && ep_info->split_ep) {
-			dp->hw_cfg.sio_credit_size = MIN(ep_info->usb_mps, UAOL_MPS_SPLIT_EP);
-		} else {
-			dp->hw_cfg.sio_credit_size = ep_info->usb_mps;
-		}
-	}
 	if (art_divider) {
 		dp->hw_cfg.art_divider_m = art_divider->multiplier;
 		dp->hw_cfg.art_divider_n = art_divider->divider;
 	}
 
-	dp->hw_cfg.service_interval = UAOL_SERVICE_INTERVAL_DEFAULT;
+	/*
+	 * Service interval from host IPC. Defaults to 1000 us  (standard isochronous) if not set
+	 * or 0. High-Speed devices can use micro frames, which can be 125/250/500 or 1000 us to
+	 * allow higher bandwidth.
+	 */
+	if (service_interval && *service_interval != 0) {
+		dp->hw_cfg.service_interval = *service_interval;
+	} else {
+		dp->hw_cfg.service_interval = UAOL_SERVICE_INTERVAL_DEFAULT;
+	}
+
+	if (config) {
+		dp->hw_cfg.feedback_stream = config->feedback_idx;
+
+		if (config->feedback_idx) {
+			uint32_t frame_usec = dp->hw_cfg.device_speed == UAOL_DEVICE_SPEED_HIGH ?
+					      USB_HS_UFRAME_USEC : USB_FS_FRAME_USEC;
+
+			/* isochronous bInterval n: every 2^(n-1) bus frames (USB 2.0 9.6.6) */
+			if (!config->feedback_period) {
+				LOG_ERR("Feedback stream %u without a feedback period",
+					config->feedback_idx);
+				return -EINVAL;
+			}
+			dp->hw_cfg.feedback_service_interval =
+				frame_usec << (CLAMP(config->feedback_period, 1, 16) - 1);
+
+			if (fb_ep_info) {
+				/* HW pcms_ctl.part.mps is 11 bits. */
+				dp->hw_cfg.feedback_packet_size = fb_ep_info->usb_mps & 0x7FF;
+			} else {
+				/* 10.14 in 3 bytes at full speed, 16.16 in 4 bytes at high speed */
+				dp->hw_cfg.feedback_packet_size =
+					dp->hw_cfg.device_speed == UAOL_DEVICE_SPEED_HIGH ? 4 : 3;
+			}
+		}
+	}
 
 	return 0;
 }
@@ -223,12 +281,7 @@ static int dai_uaol_process_dma_control_data(struct dai_intel_uaol_data *dp,
 				return -EINVAL;
 			}
 			ep_info = (struct ipc4_uaol_usb_ep_info *)tlv->value;
-			if (ep_info->direction == UAOL_USB_EP_DIRECTION_OUT && ep_info->split_ep) {
-				dp->hw_cfg.sio_credit_size =
-					MIN(ep_info->usb_mps, UAOL_MPS_SPLIT_EP);
-			} else {
-				dp->hw_cfg.sio_credit_size = ep_info->usb_mps;
-			}
+			dai_uaol_set_ep_info(dp, ep_info);
 			break;
 		default:
 			break;
@@ -274,7 +327,8 @@ static int dai_uaol_config_set(const struct device *dev, const struct dai_config
 	dp->hw_cfg.channels = cfg->channels;
 	dp->hw_cfg.sample_rate = cfg->rate;
 	dp->hw_cfg.sample_bits = cfg->word_size;
-	dp->hw_cfg.channel_map = cfg->link_config;
+	dp->hw_cfg.hda_link_map = cfg->link_config;
+	dp->hw_cfg.feedback_hda_link_map = cfg->extra_link_config;
 
 	dp->dai_state = DAI_STATE_PRE_RUNNING;
 
@@ -296,7 +350,8 @@ static int dai_uaol_config_get(const struct device *dev, struct dai_config *cfg,
 	cfg->channels = dp->hw_cfg.channels;
 	cfg->rate = dp->hw_cfg.sample_rate;
 	cfg->word_size = dp->hw_cfg.sample_bits;
-	cfg->link_config = dp->hw_cfg.channel_map;
+	cfg->link_config = dp->hw_cfg.hda_link_map;
+	cfg->extra_link_config = dp->hw_cfg.feedback_hda_link_map;
 	cfg->format = 0;
 	cfg->options = 0;
 	cfg->block_size = 0;
@@ -318,13 +373,35 @@ static const struct dai_properties *dai_uaol_get_properties(const struct device 
 	prop->fifo_depth = 0;
 	prop->dma_hs_id = 0;
 	prop->reg_init_delay = 0;
+	prop->uaol_link_id = dp->link;
+	prop->uaol_stream_id = dp->stream;
 
 	return prop;
+}
+
+static int dai_uaol_get_properties_copy(const struct device *dev,
+					enum dai_dir dir, int stream_id,
+					struct dai_properties *prop)
+{
+	const struct dai_properties *kernel_prop = dai_uaol_get_properties(dev, dir, stream_id);
+
+	if (!prop) {
+		return -EINVAL;
+	}
+
+	if (!kernel_prop) {
+		return -ENOENT;
+	}
+
+	memcpy(prop, kernel_prop, sizeof(*kernel_prop));
+
+	return 0;
 }
 
 static int dai_uaol_trigger(const struct device *dev, enum dai_dir dir, enum dai_trigger_cmd cmd)
 {
 	struct dai_intel_uaol_data *dp = dev->data;
+	int fb_stream = dp->hw_cfg.feedback_stream;
 	int ret;
 
 	ARG_UNUSED(dir);
@@ -340,9 +417,19 @@ static int dai_uaol_trigger(const struct device *dev, enum dai_dir dir, enum dai
 				LOG_ERR("uaol_config() failed, ret %d", ret);
 				return ret;
 			}
+			if (fb_stream) {
+				ret = uaol_start(dp->hw_dev, fb_stream);
+				if (ret) {
+					LOG_ERR("uaol_start() feedback failed, ret %d", ret);
+					return ret;
+				}
+			}
 			ret = uaol_start(dp->hw_dev, dp->stream);
 			if (ret) {
 				LOG_ERR("uaol_start() failed, ret %d", ret);
+				if (fb_stream) {
+					uaol_stop(dp->hw_dev, fb_stream);
+				}
 				return ret;
 			}
 			dp->dai_state = DAI_STATE_RUNNING;
@@ -352,6 +439,16 @@ static int dai_uaol_trigger(const struct device *dev, enum dai_dir dir, enum dai
 		ret = uaol_stop(dp->hw_dev, dp->stream);
 		if (ret) {
 			LOG_ERR("uaol_stop() failed, ret %d", ret);
+		}
+		if (fb_stream) {
+			int fb_ret = uaol_stop(dp->hw_dev, fb_stream);
+
+			if (fb_ret) {
+				LOG_ERR("uaol_stop() feedback failed, ret %d", fb_ret);
+				ret = ret ? ret : fb_ret;
+			}
+		}
+		if (ret) {
 			return ret;
 		}
 		dp->dai_state = DAI_STATE_PAUSED;
@@ -383,6 +480,7 @@ static DEVICE_API(dai, dai_intel_uaol_api_funcs) = {
 	.config_set		= dai_uaol_config_set,
 	.config_get		= dai_uaol_config_get,
 	.get_properties		= dai_uaol_get_properties,
+	.get_properties_copy	= dai_uaol_get_properties_copy,
 	.trigger		= dai_uaol_trigger,
 	.config_update		= dai_uaol_config_update,
 };

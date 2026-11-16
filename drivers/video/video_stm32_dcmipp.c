@@ -111,6 +111,7 @@ struct stm32_dcmipp_data {
 struct stm32_dcmipp_config {
 	const struct stm32_pclken dcmipp_pclken;
 	const struct stm32_pclken dcmipp_pclken_ker;
+	const bool has_dcmipp_ker;
 	irq_config_func_t irq_config;
 	const struct pinctrl_dev_config *pctrl;
 	const struct device *source_dev;
@@ -298,7 +299,27 @@ static const struct stm32_dcmipp_input_fmt {
 	INPUT_FMT(SGRBG14P, RAW14, 14, RAW14), INPUT_FMT(SRGGB14P, RAW14, 14, RAW14),
 	INPUT_FMT(RGB565, RGB565, 8, RGB565),
 	INPUT_FMT(YUYV, YUV422, 8, YUV422_8),
+	INPUT_FMT(RGB24, RGB888, 8, RGB888),
 };
+
+#if defined(STM32_DCMIPP_HAS_PIXEL_PIPES)
+static uint32_t stm32_dcmipp_to_hal_bayer_type(uint32_t pixelformat)
+{
+	uint32_t hal_fmt;
+
+	if (VIDEO_FMT_IS_BAYER_BGGR(pixelformat)) {
+		hal_fmt = DCMIPP_RAWBAYER_BGGR;
+	} else if (VIDEO_FMT_IS_BAYER_RGGB(pixelformat)) {
+		hal_fmt = DCMIPP_RAWBAYER_RGGB;
+	} else if (VIDEO_FMT_IS_BAYER_GBRG(pixelformat)) {
+		hal_fmt = DCMIPP_RAWBAYER_GBRG;
+	} else {
+		hal_fmt = DCMIPP_RAWBAYER_GRBG;
+	}
+
+	return hal_fmt;
+}
+#endif
 
 static const struct stm32_dcmipp_input_fmt *stm32_dcmipp_get_input_info(uint32_t pixelformat)
 {
@@ -418,6 +439,8 @@ static int stm32_dcmipp_conf_csi(const struct device *dev, uint32_t dcmipp_csi_b
 	}
 
 	phy_bitrate /= MHZ(1);
+	/* CSI use DDR hence each lane bitrate is twice the frequency */
+	phy_bitrate *= 2;
 
 	for (i = 0; i < ARRAY_SIZE(stm32_dcmipp_bitrate); i++) {
 		if (stm32_dcmipp_bitrate[i].rate >= phy_bitrate) {
@@ -1100,6 +1123,23 @@ static int stm32_dcmipp_stream_enable(const struct device *dev)
 		}
 
 		if (VIDEO_FMT_IS_BAYER(dcmipp->source_fmt.pixelformat)) {
+			DCMIPP_RawBayer2RGBConfTypeDef raw_bayer_cfg;
+
+			HAL_DCMIPP_PIPE_GetISPRawBayer2RGBConfig(&dcmipp->hdcmipp, DCMIPP_PIPE1,
+								 &raw_bayer_cfg);
+			raw_bayer_cfg.RawBayerType =
+				stm32_dcmipp_to_hal_bayer_type(dcmipp->source_fmt.pixelformat);
+
+			/* Configure demosaicing */
+			hal_ret = HAL_DCMIPP_PIPE_SetISPRawBayer2RGBConfig(&dcmipp->hdcmipp,
+									   DCMIPP_PIPE1,
+									   &raw_bayer_cfg);
+			if (hal_ret != HAL_OK) {
+				LOG_ERR("Failed to configure demosaicing");
+				ret = -EIO;
+				goto out;
+			}
+
 			/* Enable demosaicing if input format is Bayer */
 			hal_ret = HAL_DCMIPP_PIPE_EnableISPRawBayer2RGB(&dcmipp->hdcmipp,
 									DCMIPP_PIPE1);
@@ -1647,14 +1687,17 @@ static int stm32_dcmipp_enable_clock(const struct device *dev)
 	const struct device *cc_node = DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE);
 	int err;
 
-	/* Turn on DCMIPP peripheral clock */
-	err = clock_control_configure(cc_node, (clock_control_subsys_t)&config->dcmipp_pclken_ker,
-				      NULL);
-	if (err < 0) {
-		LOG_ERR("Failed to configure DCMIPP clock. Error %d", err);
-		return err;
+	if (config->has_dcmipp_ker) {
+		err = clock_control_configure(cc_node,
+					      (clock_control_subsys_t)&config->dcmipp_pclken_ker,
+					      NULL);
+		if (err < 0) {
+			LOG_ERR("Failed to configure DCMIPP clock. Error %d", err);
+			return err;
+		}
 	}
 
+	/* Turn on DCMIPP peripheral clock */
 	err = clock_control_on(cc_node, (clock_control_subsys_t)&config->dcmipp_pclken);
 	if (err < 0) {
 		LOG_ERR("Failed to enable DCMIPP clock. Error %d", err);
@@ -1878,7 +1921,10 @@ static void stm32_dcmipp_csi_isr(const struct device *dev)
 												\
 	static const struct stm32_dcmipp_config stm32_dcmipp_config_##inst = {			\
 		.dcmipp_pclken = STM32_DT_INST_CLOCK_INFO_BY_NAME(inst, dcmipp),		\
-		.dcmipp_pclken_ker = STM32_DT_INST_CLOCK_INFO_BY_NAME(inst, dcmipp_ker),	\
+		.dcmipp_pclken_ker = COND_CODE_1(DT_INST_CLOCKS_HAS_NAME(inst, dcmipp_ker),	\
+				(STM32_DT_INST_CLOCK_INFO_BY_NAME(inst, dcmipp_ker)),	\
+				({0})),							\
+		.has_dcmipp_ker = DT_INST_CLOCKS_HAS_NAME(inst, dcmipp_ker),			\
 		.irq_config = stm32_dcmipp_irq_config_##inst,					\
 		.pctrl = PINCTRL_DT_INST_DEV_CONFIG_GET(inst),					\
 		.source_dev = SOURCE_DEV(inst),							\

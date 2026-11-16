@@ -17,6 +17,8 @@ Bluetooth Classic Host and profiles
    classic/avrcp.rst
    classic/goep.rst
    classic/bip.rst
+   classic/ftp.rst
+   classic/opp.rst
 
 Bluetooth LE Audio
 ==================
@@ -61,6 +63,7 @@ Core Host and drivers
    connection_mgmt.rst
    data_buffer.rst
    hci_drivers.rst
+   hci_pkt.rst
    hci_raw.rst
    crypto.rst
 

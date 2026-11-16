@@ -270,36 +270,68 @@
 #endif
 #endif
 
-#ifdef CONFIG_SOC_NRF7120_ENGA_CPUAPP
-#ifndef NRF7120_ENGA_XXAA
-#define NRF7120_ENGA_XXAA 1
+#ifdef CONFIG_SOC_NRF54LV10A_CPUAPP
+#ifndef NRF54LV10A_XXAA
+#define NRF54LV10A_XXAA 1
 #endif
 #ifndef NRF_APPLICATION
 #define NRF_APPLICATION 1
 #endif
 #endif
 
-#ifdef CONFIG_SOC_NRF7120_ENGA_CPUFLPR
-#ifndef NRF7120_ENGA_XXAA
-#define NRF7120_ENGA_XXAA 1
+#ifdef CONFIG_SOC_NRF54LV10A_CPUFLPR
+#ifndef NRF54LV10A_XXAA
+#define NRF54LV10A_XXAA 1
 #endif
 #ifndef NRF_FLPR
 #define NRF_FLPR 1
 #endif
 #endif
 
-#ifdef CONFIG_SOC_NRF7120E_ENGA_CPUAPP
-#ifndef NRF7120E_ENGA_XXAA
-#define NRF7120E_ENGA_XXAA 1
+#ifdef CONFIG_SOC_NRF7120_CPUAPP
+#ifndef NRF7120_XXAA
+#define NRF7120_XXAA 1
 #endif
 #ifndef NRF_APPLICATION
 #define NRF_APPLICATION 1
 #endif
+#if !defined(NRF_ENABLE_NRF7120_APPROTECT_BOOT_WORKAROUND) && \
+	!defined(CONFIG_SOC_SERIES_NRF71_SKIP_PREV_IMAGE_INIT)
+#define NRF_ENABLE_NRF7120_APPROTECT_BOOT_WORKAROUND 1
+#endif
 #endif
 
-#ifdef CONFIG_SOC_NRF7120E_ENGA_CPUFLPR
-#ifndef NRF7120E_ENGA_XXAA
-#define NRF7120E_ENGA_XXAA 1
+#ifdef CONFIG_SOC_NRF7120_CPUFLPR
+#ifndef NRF7120_XXAA
+#define NRF7120_XXAA 1
+#endif
+#ifndef NRF_FLPR
+#define NRF_FLPR 1
+#endif
+#endif
+
+#ifdef CONFIG_SOC_NRF7120_DEVELOP_IN_NRF7120E
+#ifndef DEVELOP_IN_NRF7120E
+#define DEVELOP_IN_NRF7120E 1
+#endif
+#endif
+
+#ifdef CONFIG_SOC_NRF7120E_CPUAPP
+#ifndef NRF7120E_XXAA
+#define NRF7120E_XXAA 1
+#endif
+#ifndef NRF_APPLICATION
+#define NRF_APPLICATION 1
+#endif
+#if !defined(NRF_ENABLE_NRF7120_APPROTECT_BOOT_WORKAROUND) && \
+	!defined(CONFIG_SOC_SERIES_NRF71_SKIP_PREV_IMAGE_INIT)
+#define NRF_ENABLE_NRF7120_APPROTECT_BOOT_WORKAROUND 1
+#endif
+#endif
+
+#ifdef CONFIG_SOC_NRF7120E_CPUFLPR
+#ifndef NRF7120E_XXAA
+#define NRF7120E_XXAA 1
 #endif
 #ifndef NRF_FLPR
 #define NRF_FLPR 1
@@ -407,7 +439,14 @@
 #endif
 #endif
 
-#ifdef CONFIG_SOC_NRF54LX_DISABLE_FICR_TRIMCNF
+#if defined(CONFIG_SOC_SERIES_NRF71_SKIP_PREV_IMAGE_INIT)
+#ifndef NRF_DONT_RESET_BOOTCOUNT
+#define NRF_DONT_RESET_BOOTCOUNT 1
+#endif
+#endif
+
+#if defined(CONFIG_SOC_NRF54LX_DISABLE_FICR_TRIMCNF) || \
+	defined(CONFIG_SOC_SERIES_NRF71_SKIP_PREV_IMAGE_INIT)
 #ifndef NRF_DISABLE_FICR_TRIMCNF
 #define NRF_DISABLE_FICR_TRIMCNF 1
 #endif
@@ -419,7 +458,8 @@
 #endif
 #endif
 
-#ifdef CONFIG_SOC_NRF54LX_SKIP_TAMPC_SETUP
+#if defined(CONFIG_SOC_NRF54LX_SKIP_TAMPC_SETUP) || \
+	defined(CONFIG_SOC_SERIES_NRF71_SKIP_PREV_IMAGE_INIT)
 #ifndef NRF_SKIP_TAMPC_SETUP
 #define NRF_SKIP_TAMPC_SETUP 1
 #endif
@@ -450,8 +490,8 @@
 #include <zephyr/devicetree.h>
 
 /*
- * Inject HAL "NFCT_PINS_AS_GPIOS" definition if user requests to
- * configure the NFCT pins as GPIOS. Do the same with "CONFIG_GPIO_AS_PINRESET"
+ * Inject HAL "NRF_CONFIG_NFCT_PINS_AS_GPIOS" definition if user requests to
+ * configure the NFCT pins as GPIOS. Do the same with "NRF_CONFIG_GPIO_AS_PINRESET"
  * to configure the reset GPIO as nRESET. This way, the HAL will take care of
  * doing the proper configuration sequence during system init.
  */
@@ -481,7 +521,7 @@
 #endif
 #endif
 
-#if (defined(CONFIG_SOC_NRF7120_ENGA_CPUAPP) || defined(CONFIG_SOC_NRF7120E_ENGA_CPUAPP)) && \
+#if (defined(CONFIG_SOC_NRF7120_CPUAPP) || defined(CONFIG_SOC_NRF7120E_CPUAPP)) && \
 	DT_PROP(DT_NODELABEL(cpuapp), clock_frequency)
 #ifndef NRF_CONFIG_CPU_FREQ_MHZ
 #define NRF_CONFIG_CPU_FREQ_MHZ (DT_PROP(DT_NODELABEL(cpuapp), clock_frequency) / 1000000)

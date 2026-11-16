@@ -438,6 +438,9 @@ static void add_new_keypair(struct wg_peer *peer, struct wg_keypair *new_keypair
 			peer->session.keypair.next.is_valid = false;
 			peer->session.keypair.next.is_sending_valid = false;
 			peer->session.keypair.next.is_receiving_valid = false;
+
+			/* Destroy current keypairs PSA key */
+			keypair_destroy(&peer->session.keypair.current);
 		} else {
 			/* Move current to prev */
 			peer->session.keypair.prev = peer->session.keypair.current;
@@ -452,10 +455,12 @@ static void add_new_keypair(struct wg_peer *peer, struct wg_keypair *new_keypair
 		memcpy(&peer->session.keypair.current, new_keypair,
 		       sizeof(struct wg_keypair));
 	} else {
-		/* Destroy the old prev keypair's PSA keys */
+		/* Destroy the unconfirmed next and old prev, then install the
+		 * new keypair as next
+		 */
+		keypair_destroy(&peer->session.keypair.next);
 		keypair_destroy(&peer->session.keypair.prev);
 
-		/* Move next to prev (responder flow) */
 		memcpy(&peer->session.keypair.next, new_keypair,
 		       sizeof(struct wg_keypair));
 	}
@@ -1359,7 +1364,7 @@ ZTESTABLE_STATIC int wg_process_data_message(struct wg_iface_context *ctx,
 		return -ENOMEM;
 	}
 
-	copied = net_buf_linearize(buf->data, net_buf_max_len(buf), pkt->buffer,
+	copied = net_buf_linearize(buf->data, net_buf_tailroom(buf), pkt->buffer,
 				   ip_udp_hdr_len + sizeof(struct msg_transport_data),
 				   data_len);
 	if (copied != data_len) {

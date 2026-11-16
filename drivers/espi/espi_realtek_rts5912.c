@@ -6,6 +6,7 @@
 
 #define DT_DRV_COMPAT realtek_rts5912_espi
 
+#include <zephyr/irq.h>
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/espi.h>
 #include <zephyr/drivers/gpio.h>
@@ -184,8 +185,8 @@ static int espi_kbc_setup(const struct device *dev)
 	kbc_reg->VWCTRL1 = (0x01 << KBC_VWCTRL1_IRQNUM_Pos) | KBC_VWCTRL1_ACTEN;
 	kbc_reg->INTEN = KBC_INTEN_IBFINTEN | KBC_INTEN_OBFINTEN;
 
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), kbc_ibf, irq));
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), kbc_obe, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), kbc_ibf, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), kbc_obe, irq));
 
 	/* IBF */
 	IRQ_CONNECT(DT_IRQ_BY_NAME(DT_DRV_INST(0), kbc_ibf, irq),
@@ -381,7 +382,7 @@ static int espi_acpi_setup(const struct device *dev)
 	acpi_reg->VWCTRL1 = (0x00UL << ACPI_VWCTRL1_IRQNUM_Pos) | ACPI_VWCTRL1_ACTEN;
 	acpi_reg->INTEN = ACPI_INTEN_IBFINTEN;
 
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), acpi_ibf, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), acpi_ibf, irq));
 
 	/* IBF */
 	IRQ_CONNECT(DT_IRQ_BY_NAME(DT_DRV_INST(0), acpi_ibf, irq),
@@ -526,7 +527,7 @@ static int espi_promt0_setup(const struct device *dev)
 	promt0_reg->VWCTRL1 = ACPI_VWCTRL1_ACTEN;
 	promt0_reg->INTEN = ACPI_INTEN_IBFINTEN;
 
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), promt0_ibf, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), promt0_ibf, irq));
 
 	/* IBF */
 	IRQ_CONNECT(DT_IRQ_BY_NAME(DT_DRV_INST(0), promt0_ibf, irq),
@@ -615,18 +616,18 @@ static int lpc_request_write_custom(const struct espi_rts5912_config *const espi
 	switch (op) {
 	case ECUSTOM_HOST_SUBS_INTERRUPT_EN:
 		if (*data == 0) {
-			NVIC_DisableIRQ((DT_IRQ_BY_NAME(DT_DRV_INST(0), promt0_ibf, irq)));
-			NVIC_DisableIRQ((DT_IRQ_BY_NAME(DT_DRV_INST(0), acpi_ibf, irq)));
-			NVIC_DisableIRQ((DT_IRQ_BY_NAME(DT_DRV_INST(0), port80, irq)));
-			NVIC_DisableIRQ((DT_IRQ_BY_NAME(DT_DRV_INST(0), kbc_ibf, irq)));
-			NVIC_DisableIRQ((DT_IRQ_BY_NAME(DT_DRV_INST(0), kbc_obe, irq)));
+			irq_disable((DT_IRQ_BY_NAME(DT_DRV_INST(0), promt0_ibf, irq)));
+			irq_disable((DT_IRQ_BY_NAME(DT_DRV_INST(0), acpi_ibf, irq)));
+			irq_disable((DT_IRQ_BY_NAME(DT_DRV_INST(0), port80, irq)));
+			irq_disable((DT_IRQ_BY_NAME(DT_DRV_INST(0), kbc_ibf, irq)));
+			irq_disable((DT_IRQ_BY_NAME(DT_DRV_INST(0), kbc_obe, irq)));
 
 		} else {
-			NVIC_EnableIRQ((DT_IRQ_BY_NAME(DT_DRV_INST(0), promt0_ibf, irq)));
-			NVIC_EnableIRQ((DT_IRQ_BY_NAME(DT_DRV_INST(0), acpi_ibf, irq)));
-			NVIC_EnableIRQ((DT_IRQ_BY_NAME(DT_DRV_INST(0), port80, irq)));
-			NVIC_EnableIRQ((DT_IRQ_BY_NAME(DT_DRV_INST(0), kbc_ibf, irq)));
-			NVIC_EnableIRQ((DT_IRQ_BY_NAME(DT_DRV_INST(0), kbc_obe, irq)));
+			irq_enable((DT_IRQ_BY_NAME(DT_DRV_INST(0), promt0_ibf, irq)));
+			irq_enable((DT_IRQ_BY_NAME(DT_DRV_INST(0), acpi_ibf, irq)));
+			irq_enable((DT_IRQ_BY_NAME(DT_DRV_INST(0), port80, irq)));
+			irq_enable((DT_IRQ_BY_NAME(DT_DRV_INST(0), kbc_ibf, irq)));
+			irq_enable((DT_IRQ_BY_NAME(DT_DRV_INST(0), kbc_obe, irq)));
 		}
 		break;
 	case ECUSTOM_HOST_CMD_SEND_RESULT:
@@ -666,7 +667,7 @@ static void espi_periph_ch_setup(const struct device *dev)
 
 	espi_reg->EPINTEN = ESPI_EPINTEN_CFGCHGEN | ESPI_EPINTEN_MEMWREN | ESPI_EPINTEN_MEMRDEN;
 
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), periph_ch, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), periph_ch, irq));
 
 	IRQ_CONNECT(DT_IRQ_BY_NAME(DT_DRV_INST(0), periph_ch, irq),
 		    DT_IRQ_BY_NAME(DT_DRV_INST(0), periph_ch, priority), espi_periph_ch_isr,
@@ -727,7 +728,7 @@ static int espi_peri_ch_port80_setup(const struct device *dev)
 	port80_reg->CFG = PORT80_CFG_CLRFLG | PORT80_CFG_THREEN;
 	port80_reg->INTEN = PORT80_INTEN_THREINTEN;
 
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), port80, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), port80, irq));
 
 	IRQ_CONNECT(DT_IRQ_BY_NAME(DT_DRV_INST(0), port80, irq),
 		    DT_IRQ_BY_NAME(DT_DRV_INST(0), port80, priority), espi_port80_isr,
@@ -927,27 +928,55 @@ static const struct espi_vw_signal_t vw_idx2_signals[] = {
 	{ESPI_VWIRE_SIGNAL_SLP_S5, vw_slp5_handler},
 };
 
-static void espi_vw_idx2_isr(const struct device *dev)
-{
-	const struct espi_rts5912_config *const espi_config = dev->config;
-	volatile struct espi_reg *const espi_reg = espi_config->espi_reg;
-	uint8_t cur_idx_data = espi_reg->EVIDX2;
-	uint8_t updated_bit = cur_idx_data ^ espi_vw_ch_cached_data.idx2;
+struct vw_idx2_msg {
+	const struct device *dev;
+	uint8_t data;
+};
 
-	if (espi_reg->EVSTS & ESPI_EVSTS_IDX2CHG) {
-		espi_vw_ch_cached_data.idx2 = cur_idx_data;
+/* using quesu to store vw status */
+K_MSGQ_DEFINE(espi_vw_idx2_msgq, sizeof(struct vw_idx2_msg), 8, 4);
+
+static void espi_vw_idx2_thread(void *p1, void *p2, void *p3)
+{
+	struct vw_idx2_msg msg;
+	uint8_t updated_bit;
+
+	while (1) {
+
+		k_msgq_get(&espi_vw_idx2_msgq, &msg, K_FOREVER);
+
+		updated_bit = msg.data ^ espi_vw_ch_cached_data.idx2;
+		espi_vw_ch_cached_data.idx2 = msg.data;
 
 		for (int i = 0; i < ARRAY_SIZE(vw_idx2_signals); i++) {
 			enum espi_vwire_signal vw_signal = vw_idx2_signals[i].signal;
 
-			if (updated_bit & vw_channel_list[vw_signal].level_mask &&
-			    vw_idx2_signals[i].vw_signal_callback != NULL) {
-				vw_idx2_signals[i].vw_signal_callback(dev);
+			if ((updated_bit & vw_channel_list[vw_signal].level_mask) &&
+			    (vw_idx2_signals[i].vw_signal_callback != NULL)) {
+				vw_idx2_signals[i].vw_signal_callback(msg.dev);
 			}
 		}
-		if (espi_vw_ch_cached_data.idx2 == espi_reg->EVIDX2) {
-			espi_reg->EVSTS = ESPI_EVSTS_IDX2CHG;
-		}
+	}
+}
+
+K_THREAD_DEFINE(vw_idx2_thread_id, 384, espi_vw_idx2_thread, NULL, NULL, NULL,
+		K_PRIO_COOP(5), 0, 0);
+
+static void espi_vw_idx2_isr(const struct device *dev)
+{
+	const struct espi_rts5912_config *const espi_config = dev->config;
+	volatile struct espi_reg *const espi_reg = espi_config->espi_reg;
+
+	if (espi_reg->EVSTS & ESPI_EVSTS_IDX2CHG) {
+		uint8_t cur_idx_data = espi_reg->EVIDX2;
+
+		espi_reg->EVSTS = ESPI_EVSTS_IDX2CHG;
+
+		struct vw_idx2_msg msg = {
+			.dev = dev,
+			.data = cur_idx_data
+		};
+		k_msgq_put(&espi_vw_idx2_msgq, &msg, K_NO_WAIT);
 	}
 }
 
@@ -1570,18 +1599,18 @@ static void espi_vw_ch_setup(const struct device *dev, bool first_init)
 
 	espi_reg->EVRXINTEN = (ESPI_EVRXINTEN_CFGCHGEN | ESPI_EVRXINTEN_RXCHGEN);
 
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_ch, irq));
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx2, irq));
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx3, irq));
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx7, irq));
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx41, irq));
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx42, irq));
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx43, irq));
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx44, irq));
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx47, irq));
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx4a, irq));
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx51, irq));
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx61, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_ch, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx2, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx3, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx7, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx41, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx42, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx43, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx44, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx47, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx4a, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx51, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_idx61, irq));
 
 	IRQ_CONNECT(DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_ch, irq),
 		    DT_IRQ_BY_NAME(DT_DRV_INST(0), vw_ch, priority), espi_vw_ch_isr,
@@ -1737,6 +1766,9 @@ static int espi_rts5912_send_oob(const struct device *dev, struct espi_oob_packe
 	const struct espi_rts5912_config *const espi_config = dev->config;
 	struct espi_rts5912_data *espi_data = dev->data;
 	volatile struct espi_reg *const espi_reg = espi_config->espi_reg;
+	volatile struct acpi_reg *const acpi_reg = espi_config->acpi_reg;
+	volatile struct acpi_reg *const promt0_reg = espi_config->promt0_reg;
+	volatile struct kbc_reg *const kbc_reg = espi_config->kbc_reg;
 	int ret;
 
 	if (!(espi_reg->EOCFG & ESPI_EOCFG_CHRDY)) {
@@ -1754,12 +1786,25 @@ static int espi_rts5912_send_oob(const struct device *dev, struct espi_oob_packe
 		return -EINVAL;
 	}
 
+	/* Check if any data in port fifo */
+	if ((acpi_reg->STS & ACPI_STS_IBF) || (kbc_reg->STS & KBC_STS_IBF) ||
+		(promt0_reg->STS & ACPI_STS_IBF) || (acpi_reg->STS & ACPI_STS_OBF) ||
+		(kbc_reg->STS & KBC_STS_OBF) || (promt0_reg->STS & ACPI_STS_OBF)) {
+		LOG_ERR("%s: OOB channel need wait for io", __func__);
+		return -EBUSY;
+	}
+
+	__disable_irq();
+
 	for (int i = 0; i < pckt->len; i++) {
 		espi_data->oob_tx_ptr[i] = pckt->buf[i];
 	}
 
 	espi_reg->EOTXLEN = pckt->len - 1;
+
 	espi_reg->EOTXCTRL = ESPI_EOTXCTRL_TXSTR;
+
+	__enable_irq();
 
 	espi_data->oob_tx_busy = true;
 
@@ -1914,9 +1959,9 @@ static int espi_oob_ch_setup(const struct device *dev)
 	k_sem_init(&espi_data->oob_rx_lock, 0, 1);
 #endif
 
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), oob_tx, irq));
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), oob_rx, irq));
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), oob_chg, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), oob_tx, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), oob_rx, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), oob_chg, irq));
 
 	/* Tx */
 	IRQ_CONNECT(DT_IRQ_BY_NAME(DT_DRV_INST(0), oob_tx, irq),
@@ -2131,8 +2176,8 @@ static int espi_flash_ch_setup(const struct device *dev)
 
 	k_sem_init(&espi_data->flash_lock, 0, 1);
 
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), maf_tr, irq));
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), flash_chg, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), maf_tr, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), flash_chg, irq));
 
 	/* MAF Tr */
 	IRQ_CONNECT(DT_IRQ_BY_NAME(DT_DRV_INST(0), maf_tr, irq),
@@ -2398,7 +2443,7 @@ static void espi_bus_reset_setup(const struct device *dev)
 	 */
 	espi_reg->ERSTCFG |= ESPI_ERSTCFG_RSTSTS;
 
-	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), bus_rst, irq));
+	k_irq_clear_pending(DT_IRQ_BY_NAME(DT_DRV_INST(0), bus_rst, irq));
 
 	IRQ_CONNECT(DT_IRQ_BY_NAME(DT_DRV_INST(0), bus_rst, irq),
 		    DT_IRQ_BY_NAME(DT_DRV_INST(0), bus_rst, priority), espi_rst_isr,
@@ -2520,7 +2565,7 @@ static int espi_rts5912_init(const struct device *dev)
 	static struct gpio_callback cb;
 	uint32_t cs_irq_nun = gpio_rts5912_get_pin_num(&espi_config->cs_pin);
 
-	NVIC_ClearPendingIRQ(cs_irq_nun);
+	k_irq_clear_pending(cs_irq_nun);
 	gpio_init_callback(&cb, espi_cs_low_isr, BIT(espi_config->cs_pin.pin));
 	gpio_add_callback(espi_config->cs_pin.port, &cb);
 	irq_enable(cs_irq_nun);

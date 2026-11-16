@@ -5,6 +5,7 @@
  */
 
 #include "kernel_internal.h"
+#include <kuser.h>
 
 #include <zephyr/kernel.h>
 #include <ksched.h>
@@ -58,6 +59,8 @@ static k_thread_stack_t *z_thread_stack_alloc_pool(size_t size, int flags)
 
 static k_thread_stack_t *z_thread_stack_alloc_dyn(size_t size, int flags)
 {
+	size_t stack_len;
+
 	if ((flags & K_USER) == K_USER) {
 #ifdef CONFIG_DYNAMIC_OBJECTS
 		return k_object_alloc_size(K_OBJ_THREAD_STACK_ELEMENT, size);
@@ -69,7 +72,12 @@ static k_thread_stack_t *z_thread_stack_alloc_dyn(size_t size, int flags)
 #endif /* CONFIG_DYNAMIC_OBJECTS */
 	}
 
-	return z_thread_aligned_alloc(Z_KERNEL_STACK_OBJ_ALIGN, K_KERNEL_STACK_LEN(size));
+	stack_len = K_KERNEL_STACK_LEN(size);
+	if (stack_len < size) {
+		return NULL;
+	}
+
+	return z_thread_aligned_alloc(Z_KERNEL_STACK_OBJ_ALIGN, stack_len);
 }
 
 k_thread_stack_t *z_impl_k_thread_stack_alloc(size_t size, int flags)
@@ -139,15 +147,9 @@ int z_impl_k_thread_stack_free(k_thread_stack_t *stack)
 	}
 
 	if (IS_ENABLED(CONFIG_DYNAMIC_THREAD_ALLOC)) {
-#ifdef CONFIG_USERSPACE
-		if (k_object_find(stack)) {
-			k_object_free(stack);
-		} else {
+		if (!z_stack_user_free(stack)) {
 			k_free(stack);
 		}
-#else
-		k_free(stack);
-#endif /* CONFIG_USERSPACE */
 	} else {
 		LOG_DBG("Invalid stack %p", stack);
 		return -EINVAL;

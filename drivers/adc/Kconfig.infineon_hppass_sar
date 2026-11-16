@@ -1,5 +1,5 @@
-# SPDX-FileCopyrightText: <text>Copyright (c) 2026 Infineon Technologies AG,
-# or an affiliate of Infineon Technologies AG. All rights reserved.</text>
+# SPDX-FileCopyrightText: Copyright (c) 2026 Infineon Technologies AG,
+# SPDX-FileCopyrightText: or an affiliate of Infineon Technologies AG. All rights reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
 
@@ -20,6 +20,12 @@ config ADC_INFINEON_HPPASS_SAR
 	  conversion capabilities
 
 if ADC_INFINEON_HPPASS_SAR
+
+config ADC_INFINEON_HPPASS_SAR_V3
+	def_bool DT_HAS_INFINEON_HPPASS_SAR_ADC_V3_ENABLED
+	help
+	  Set when the SAR node carries the MCPASS v3 register layout, which
+	  moves the sequencer, channel config and result registers.
 
 config ADC_INFINEON_HPPASS_SAR_INIT_PRIORITY
 	int "Infineon HPPASS SAR ADC driver init priority"

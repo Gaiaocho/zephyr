@@ -813,9 +813,9 @@ static int nrf_wifi_drv_main_zep(const struct device *dev)
 #ifdef CONFIG_WIFI_MGMT_RAW_SCAN_RESULTS
 	callbk_fns.rx_bcn_prb_resp_callbk_fn = nrf_wifi_rx_bcn_prb_resp_frm;
 #endif /* CONFIG_WIFI_MGMT_RAW_SCAN_RESULTS */
-#ifdef CONFIG_NRF70_SYSTEM_MODE
+#if defined(CONFIG_NRF70_STA_MODE) || defined(CONFIG_NRF70_RAW_DATA_RX)
 	callbk_fns.set_if_callbk_fn = nrf_wifi_set_iface_event_handler;
-#endif /* CONFIG_NRF70_SYSTEM_MODE */
+#endif /* CONFIG_NRF70_STA_MODE || CONFIG_NRF70_RAW_DATA_RX */
 #ifdef CONFIG_NRF70_STA_MODE
 	callbk_fns.twt_config_callbk_fn = nrf_wifi_event_proc_twt_setup_zep;
 	callbk_fns.twt_teardown_callbk_fn = nrf_wifi_event_proc_twt_teardown_zep;
@@ -974,7 +974,7 @@ static const struct zep_wpa_supp_dev_ops wpa_supp_ops = {
 
 
 #ifdef CONFIG_NET_L2_ETHERNET
-static const struct net_wifi_mgmt_offload wifi_offload_ops = {
+static DEVICE_API(wifi_native, wifi_offload_ops) = {
 	.wifi_iface.iface_api.init = nrf_wifi_if_init_zep,
 	.wifi_iface.start = nrf_wifi_if_start_zep,
 	.wifi_iface.stop = nrf_wifi_if_stop_zep,

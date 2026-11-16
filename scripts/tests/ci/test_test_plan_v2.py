@@ -422,6 +422,7 @@ class TestBoilerplateFilter:
     # ------------------------------------------------------------------
 
     def test_pure_spdx_change(self):
+        # REUSE-IgnoreStart
         diff = textwrap.dedent("""\
             --- a/drivers/foo/foo.c
             +++ b/drivers/foo/foo.c
@@ -429,6 +430,7 @@ class TestBoilerplateFilter:
             -// SPDX-License-Identifier: BSD-3-Clause
             +// SPDX-License-Identifier: Apache-2.0
         """)
+        # REUSE-IgnoreEnd
         s = tp.BoilerplateFilter()
         assert s._all_changes_boilerplate(diff) is True
 
@@ -478,6 +480,25 @@ class TestBoilerplateFilter:
         s = tp.BoilerplateFilter()
         assert s._all_changes_boilerplate(diff) is False
 
+    def test_delimiter_prefixed_substantive_changes_detected(self):
+        changes = [
+            ("#define FOO_TIMEOUT 100", "#define FOO_TIMEOUT 200"),
+            ("#include <zephyr/foo.h>", "#include <zephyr/bar.h>"),
+            ("*ptr = 1;", "*ptr = 0;"),
+        ]
+
+        s = tp.BoilerplateFilter()
+
+        for old, new in changes:
+            diff = textwrap.dedent(f"""\
+                --- a/drivers/foo/foo.c
+                +++ b/drivers/foo/foo.c
+                @@ -20 +20 @@
+                -{old}
+                +{new}
+            """)
+            assert s._all_changes_boilerplate(diff) is False
+
     def test_mixed_boilerplate_and_code_not_boilerplate(self):
         diff = textwrap.dedent("""\
             --- a/drivers/foo/foo.c
@@ -516,6 +537,7 @@ class TestBoilerplateFilter:
         assert "drivers/foo/foo.c" in handled
 
     def test_boilerplate_file_consumed(self):
+        # REUSE-IgnoreStart
         spdx_diff = textwrap.dedent("""\
             --- a/drivers/foo/foo.c
             +++ b/drivers/foo/foo.c
@@ -523,6 +545,7 @@ class TestBoilerplateFilter:
             -// SPDX-License-Identifier: BSD-3-Clause
             +// SPDX-License-Identifier: Apache-2.0
         """)
+        # REUSE-IgnoreEnd
         # ws_only diff is non-empty (SPDX is not whitespace), full diff has only boilerplate
         s = self._strategy({"drivers/foo/foo.c": (spdx_diff, spdx_diff)})
         _, handled = s.analyze(["drivers/foo/foo.c"])
@@ -535,6 +558,18 @@ class TestBoilerplateFilter:
             @@ -20 +20 @@
             -\treturn 0;
             +\treturn -EIO;
+        """)
+        s = self._strategy({"drivers/foo/foo.c": (code_diff, code_diff)})
+        _, handled = s.analyze(["drivers/foo/foo.c"])
+        assert "drivers/foo/foo.c" not in handled
+
+    def test_preprocessor_change_not_consumed(self):
+        code_diff = textwrap.dedent("""\
+            --- a/drivers/foo/foo.c
+            +++ b/drivers/foo/foo.c
+            @@ -20 +20 @@
+            -#define FOO_TIMEOUT 100
+            +#define FOO_TIMEOUT 200
         """)
         s = self._strategy({"drivers/foo/foo.c": (code_diff, code_diff)})
         _, handled = s.analyze(["drivers/foo/foo.c"])
@@ -750,6 +785,94 @@ class TestSnippetStrategy:
         s._check_manifest(manifest, "my-snippet", acc)
         assert len(acc) == 1
 
+    def test_check_manifest_extra_args_snippet(self, tmp_path):
+        manifest = tmp_path / "testcase.yaml"
+        manifest.write_text(
+            textwrap.dedent("""\
+            tests:
+              my.test:
+                extra_args: SNIPPET="my-snippet"
+        """)
+        )
+        s = self._strategy(tmp_path)
+        acc: set = set()
+        s._check_manifest(manifest, "my-snippet", acc)
+        assert len(acc) == 1
+
+    def test_check_manifest_conditional_extra_args_snippet(self, tmp_path):
+        manifest = tmp_path / "testcase.yaml"
+        manifest.write_text(
+            textwrap.dedent("""\
+            tests:
+              my.test:
+                extra_args:
+                  - platform:native_sim/native:SNIPPET="my-snippet"
+        """)
+        )
+        s = self._strategy(tmp_path)
+        acc: set = set()
+        s._check_manifest(manifest, "my-snippet", acc)
+        assert len(acc) == 1
+
+    def test_check_manifest_multiple_extra_args_snippets(self, tmp_path):
+        manifest = tmp_path / "testcase.yaml"
+        manifest.write_text(
+            textwrap.dedent("""\
+            tests:
+              my.test:
+                extra_args:
+                  - SNIPPET="other-snippet;my-snippet"
+        """)
+        )
+        s = self._strategy(tmp_path)
+        acc: set = set()
+        s._check_manifest(manifest, "my-snippet", acc)
+        assert len(acc) == 1
+
+    def test_check_manifest_image_snippet(self, tmp_path):
+        manifest = tmp_path / "testcase.yaml"
+        manifest.write_text(
+            textwrap.dedent("""\
+            tests:
+              my.test:
+                extra_args:
+                  - child_SNIPPET=my-snippet
+        """)
+        )
+        s = self._strategy(tmp_path)
+        acc: set = set()
+        s._check_manifest(manifest, "my-snippet", acc)
+        assert len(acc) == 1
+
+    def test_check_manifest_conditional_image_snippet(self, tmp_path):
+        manifest = tmp_path / "testcase.yaml"
+        manifest.write_text(
+            textwrap.dedent("""\
+            tests:
+              my.test:
+                extra_args:
+                  - platform:nrf54l:child_SNIPPET=my-snippet
+        """)
+        )
+        s = self._strategy(tmp_path)
+        acc: set = set()
+        s._check_manifest(manifest, "my-snippet", acc)
+        assert len(acc) == 1
+
+    def test_check_manifest_extra_args_snippet_exact_match(self, tmp_path):
+        manifest = tmp_path / "testcase.yaml"
+        manifest.write_text(
+            textwrap.dedent("""\
+            tests:
+              my.test:
+                extra_args: SNIPPET="my-snippet-extra"
+        """)
+        )
+        s = self._strategy(tmp_path)
+        acc: set = set()
+        s._check_manifest(manifest, "my-snippet", acc)
+        assert len(acc) == 0
+
     def test_check_manifest_no_match(self, tmp_path):
         manifest = tmp_path / "testcase.yaml"
         manifest.write_text(
@@ -780,6 +903,23 @@ class TestSnippetStrategy:
         acc: set = set()
         s._check_manifest(manifest, "my-snippet", acc)
         assert len(acc) == 1
+
+    def test_check_manifest_invalid_snippet_args_not_matched(self, tmp_path):
+        manifest = tmp_path / "testcase.yaml"
+        manifest.write_text(
+            textwrap.dedent("""\
+            tests:
+              my.test:
+                extra_args:
+                  - unknown:posix:SNIPPET=my-snippet
+                  - OPTION=x:SNIPPET=my-snippet
+                  - arch:posix:other:SNIPPET=my-snippet
+            """)
+        )
+        s = self._strategy(tmp_path)
+        acc: set = set()
+        s._check_manifest(manifest, "my-snippet", acc)
+        assert len(acc) == 0
 
     def test_analyze_non_snippet_files_ignored(self, tmp_path):
         s = self._strategy(tmp_path)

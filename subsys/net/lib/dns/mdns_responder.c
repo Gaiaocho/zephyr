@@ -56,6 +56,11 @@ extern void dns_dispatcher_svc_handler(struct net_socket_service_event *pev);
 
 #define MDNS_TTL CONFIG_MDNS_RESPONDER_TTL /* In seconds */
 
+/* RFC 6762 6.7: an answer to a legacy unicast query may be cached by something
+ * that knows nothing about multicast DNS, so it is given a short life.
+ */
+#define MDNS_LEGACY_TTL 10 /* In seconds */
+
 #if defined(CONFIG_NET_INTERFACE_NAME_LEN)
 #define INTERFACE_NAME_LEN CONFIG_NET_INTERFACE_NAME_LEN
 #else
@@ -269,10 +274,12 @@ struct mdns_monitor_iface_addr {
 };
 
 static struct mdns_monitor_iface_addr mon_if[
-	MAX(MAX_IPV4_IFACE_COUNT, MAX_IPV4_IFACE_COUNT) *
+	MDNS_MAX_IFACE_COUNT *
 	(NET_IF_MAX_IPV4_ADDR + NET_IF_MAX_IPV6_ADDR)];
 #endif
 
+/* Serializes the external record table with the readers walking it */
+static K_MUTEX_DEFINE(external_records_lock);
 static const struct dns_sd_rec *external_records;
 static size_t external_records_count;
 
@@ -300,6 +307,9 @@ static void create_ipv6_addr(struct net_sockaddr_in6 *addr)
 	/* Well known IPv6 ff02::fb address */
 	net_ipv6_addr_create(&addr->sin6_addr,
 			     0xff02, 0, 0, 0, 0, 0, 0, 0x00fb);
+
+	/* Not scoped to any interface. */
+	addr->sin6_scope_id = 0;
 }
 
 static void create_ipv4_addr(struct net_sockaddr_in *addr)
@@ -353,6 +363,31 @@ static int set_ttl_hop_limit(int sock, int level, int option, int new_limit)
 	return zsock_setsockopt(sock, level, option, &new_limit, sizeof(new_limit));
 }
 
+/* A querier that did not ask from port 5353 is not another multicast DNS
+ * responder but something making a one-off lookup, a resolver library or a
+ * command line tool. RFC 6762 6.7 calls that a legacy unicast query and asks
+ * for an answer such a querier can understand: sent back to it alone, with the
+ * question repeated and the identifier it used, without the cache flush bit,
+ * and with a short time to live so that whatever caches it does not hold the
+ * answer long.
+ */
+static bool is_legacy_query(const struct net_sockaddr *src)
+{
+	if (src == NULL) {
+		return false;
+	}
+
+	if (IS_ENABLED(CONFIG_NET_IPV4) && src->sa_family == NET_AF_INET) {
+		return net_sin(src)->sin_port != net_htons(MDNS_LISTEN_PORT);
+	}
+
+	if (IS_ENABLED(CONFIG_NET_IPV6) && src->sa_family == NET_AF_INET6) {
+		return net_sin6(src)->sin6_port != net_htons(MDNS_LISTEN_PORT);
+	}
+
+	return false;
+}
+
 int setup_dst_addr(int sock, net_sa_family_t family,
 		   struct net_sockaddr *src, net_socklen_t src_len,
 		   struct net_sockaddr *dst, net_socklen_t *dst_len)
@@ -360,7 +395,7 @@ int setup_dst_addr(int sock, net_sa_family_t family,
 	int ret;
 
 	if (IS_ENABLED(CONFIG_NET_IPV4) && family == NET_AF_INET) {
-		if ((src != NULL) && (net_sin(src)->sin_port != net_htons(MDNS_LISTEN_PORT))) {
+		if (is_legacy_query(src)) {
 			memcpy(dst, src, src_len);
 			*dst_len = src_len;
 		} else {
@@ -373,7 +408,7 @@ int setup_dst_addr(int sock, net_sa_family_t family,
 			}
 		}
 	} else if (IS_ENABLED(CONFIG_NET_IPV6) && family == NET_AF_INET6) {
-		if ((src != NULL) && (net_sin6(src)->sin6_port != net_htons(MDNS_LISTEN_PORT))) {
+		if (is_legacy_query(src)) {
 			memcpy(dst, src, src_len);
 			*dst_len = src_len;
 		} else {
@@ -396,16 +431,28 @@ int setup_dst_addr(int sock, net_sa_family_t family,
 static int get_socket(net_sa_family_t family)
 {
 	int ret;
+	int on = 1;
 
 	ret = zsock_socket(family, NET_SOCK_DGRAM, NET_IPPROTO_UDP);
 	if (ret < 0) {
-		ret = -errno;
+		return -errno;
 	}
+
+	/* mDNS is a shared-port protocol: the well-known port 5353 is meant to be
+	 * co-bound by multiple listeners on the same host (RFC 6762), including the
+	 * host stack behind offloaded sockets, so allow address reuse on any stack.
+	 */
+	(void)zsock_setsockopt(ret, ZSOCK_SOL_SOCKET, ZSOCK_SO_REUSEADDR, &on, sizeof(on));
 
 	return ret;
 }
 
-static void setup_dns_hdr(uint8_t *buf, uint16_t answers)
+/* dns_id and questions are zero for a multicast answer, which carries neither
+ * an identifier nor the question, RFC 6762 18.1. An answer to a legacy unicast
+ * query carries both, RFC 6762 6.7.
+ */
+static void setup_dns_hdr(uint8_t *buf, uint16_t answers, uint16_t dns_id,
+			  uint16_t questions)
 {
 	struct dns_header *hdr = (struct dns_header *)buf;
 	uint16_t flags;
@@ -415,9 +462,9 @@ static void setup_dns_hdr(uint8_t *buf, uint16_t answers)
 	flags = BIT(15);  /* This is response */
 	flags |= BIT(10); /* Authoritative Answer */
 
-	UNALIGNED_PUT(0, UNALIGNED_MEMBER_ADDR(hdr, id)); /* Identifier, RFC 6762 ch 18.1 */
+	UNALIGNED_PUT(net_htons(dns_id), UNALIGNED_MEMBER_ADDR(hdr, id));
 	UNALIGNED_PUT(net_htons(flags), UNALIGNED_MEMBER_ADDR(hdr, flags));
-	UNALIGNED_PUT(0, UNALIGNED_MEMBER_ADDR(hdr, qdcount));
+	UNALIGNED_PUT(net_htons(questions), UNALIGNED_MEMBER_ADDR(hdr, qdcount));
 	UNALIGNED_PUT(net_htons(answers), UNALIGNED_MEMBER_ADDR(hdr, ancount));
 	UNALIGNED_PUT(0, UNALIGNED_MEMBER_ADDR(hdr, nscount));
 	UNALIGNED_PUT(0, UNALIGNED_MEMBER_ADDR(hdr, arcount));
@@ -429,9 +476,12 @@ static int init_name_labels(struct net_buf *query)
 	char *prev = query->data + DNS_MSG_HEADER_SIZE;
 
 	/* Verify the buffer has enough space to store header and query name
-	 * + 2 for the length of the first label and the terminator byte
+	 * + 2 for the length of the first label and the terminator byte,
+	 * + the type and class of an echoed question, which an answer to a
+	 * legacy unicast query appends straight after the name.
 	 */
-	if ((net_buf_max_len(query) - query->len) < (DNS_MSG_HEADER_SIZE + 2)) {
+	if (net_buf_tailroom(query) <
+	    (DNS_MSG_HEADER_SIZE + 2 + DNS_QTYPE_LEN + DNS_QCLASS_LEN)) {
 		return -ENOBUFS;
 	}
 
@@ -462,6 +512,7 @@ struct answer_ctx {
 	enum dns_rr_type qtype;
 	int answer_count;
 	uint16_t name_offset;
+	bool legacy;
 };
 
 static void add_a_aaaa_answer(struct answer_ctx *ctx, uint32_t ttl,
@@ -486,8 +537,16 @@ static void add_a_aaaa_answer(struct answer_ctx *ctx, uint32_t ttl,
 	}
 
 	net_buf_add_be16(ctx->query, ctx->qtype);
-	/* Bit 15 tells to flush the cache */
-	net_buf_add_be16(ctx->query, DNS_CLASS_IN | BIT(15));
+
+	/* The cache flush bit tells a multicast DNS cache to drop what it
+	 * held for this name. It must not be set in an answer to a legacy
+	 * unicast query, RFC 6762 10.2, because whatever cached that answer
+	 * is not a multicast DNS cache and would read bit 15 as part of the
+	 * class.
+	 */
+	net_buf_add_be16(ctx->query,
+			 ctx->legacy ? DNS_CLASS_IN
+				     : (DNS_CLASS_IN | DNS_CLASS_FLUSH));
 	net_buf_add_be32(ctx->query, ttl);
 	net_buf_add_be16(ctx->query, addr_len);
 	net_buf_add_mem(ctx->query, addr, addr_len);
@@ -518,27 +577,44 @@ static void answer_addr_cb(struct net_if *iface, struct net_if_addr *ifaddr,
 
 	/* First answer contains full DNS name (already encoded). Consecutive
 	 * answers use label compression and encode label pointers.
+	 *
+	 * When the question is echoed, the name at that offset belongs to the
+	 * question rather than to the first answer, so every answer points at
+	 * it, the first one included.
 	 */
-	if (ctx->answer_count == 0) {
+	if (ctx->answer_count == 0 && !ctx->legacy) {
 		include_name_ptr = false;
 	}
 
-	add_a_aaaa_answer(ctx, MDNS_TTL, addr_len, addr, include_name_ptr);
+	add_a_aaaa_answer(ctx, ctx->legacy ? MDNS_LEGACY_TTL : MDNS_TTL,
+			  addr_len, addr, include_name_ptr);
 }
 
 static int create_answer(struct net_buf *query, enum dns_rr_type qtype,
-			 struct net_if *iface)
+			 struct net_if *iface, bool legacy, uint16_t dns_id)
 {
 	struct answer_ctx ctx = {
 		.query = query,
 		.qtype = qtype,
 		.name_offset = DNS_MSG_HEADER_SIZE,
+		.legacy = legacy,
 	};
 	int ret;
 
 	ret = init_name_labels(query);
 	if (ret < 0) {
 		return ret;
+	}
+
+	if (legacy) {
+		/* Repeat the question, RFC 6762 6.7. The name is already
+		 * there, written by init_name_labels() at the offset the
+		 * answers point back to, so only its type and class are
+		 * missing. The class is written plain: the unicast response
+		 * bit a querier may have set in it has no meaning coming back.
+		 */
+		net_buf_add_be16(query, qtype);
+		net_buf_add_be16(query, DNS_CLASS_IN);
 	}
 
 	if ((qtype == DNS_RR_TYPE_A) && IS_ENABLED(CONFIG_NET_IPV4)) {
@@ -554,7 +630,12 @@ static int create_answer(struct net_buf *query, enum dns_rr_type qtype,
 		return -ENOMEM;
 	}
 
-	setup_dns_hdr(query->data, ctx.answer_count);
+	/* A multicast answer carries neither an identifier nor the question:
+	 * RFC 6762 18.1 has the identifier zero on transmission and ignored on
+	 * reception, because there is no one querier it belongs to.
+	 */
+	setup_dns_hdr(query->data, ctx.answer_count, legacy ? dns_id : 0U,
+		      legacy ? 1U : 0U);
 
 	return 0;
 }
@@ -565,7 +646,8 @@ static int send_response(int sock,
 			 size_t addrlen,
 			 struct net_buf *query,
 			 enum dns_rr_type qtype,
-			 struct net_if *recv_if)
+			 struct net_if *recv_if,
+			 uint16_t dns_id)
 {
 	struct net_if *iface;
 	net_socklen_t dst_len;
@@ -596,7 +678,7 @@ static int send_response(int sock,
 		return -EINVAL;
 	}
 
-	ret = create_answer(query, qtype, iface);
+	ret = create_answer(query, qtype, iface, is_legacy_query(src_addr), dns_id);
 	if (ret != 0) {
 		return -ENOMEM;
 	}
@@ -618,10 +700,12 @@ static void send_sd_response(int sock,
 			     struct net_sockaddr *src_addr,
 			     size_t addrlen,
 			     struct net_buf *result,
-			     struct net_if *recv_if)
+			     struct net_if *recv_if,
+			     enum dns_rr_type qtype)
 {
 	struct net_if *iface;
 	net_socklen_t dst_len;
+	size_t result_size;
 	int ret;
 	const struct dns_sd_rec *record;
 	/* filter must be zero-initialized for "wildcard" port */
@@ -645,7 +729,7 @@ static void send_sd_response(int sock,
 	};
 	size_t n = ARRAY_SIZE(label);
 	size_t rec_num;
-	size_t ext_rec_num = external_records_count;
+	size_t ext_rec_num;
 	COND_CODE_1(IS_ENABLED(CONFIG_NET_IPV6),
 		    (struct net_sockaddr_in6), (struct net_sockaddr_in)) dst;
 
@@ -714,8 +798,15 @@ static void send_sd_response(int sock,
 		return;
 	}
 
-	if (IS_ENABLED(CONFIG_MDNS_RESPONDER_DNS_SD_SERVICE_TYPE_ENUMERATION)
-		&& dns_sd_is_service_type_enumeration(&filter)) {
+	/* SRV and TXT records exist only on service instance names. */
+	if ((qtype == DNS_RR_TYPE_SRV || qtype == DNS_RR_TYPE_TXT) &&
+	    filter.instance == NULL) {
+		return;
+	}
+
+	if (qtype == DNS_RR_TYPE_PTR &&
+	    IS_ENABLED(CONFIG_MDNS_RESPONDER_DNS_SD_SERVICE_TYPE_ENUMERATION) &&
+	    dns_sd_is_service_type_enumeration(&filter)) {
 
 		/*
 		 * RFC 6763, Section 9
@@ -729,7 +820,19 @@ static void send_sd_response(int sock,
 		service_type_enum = true;
 	}
 
+	/* Each response is encoded from result->data over the extracted query,
+	 * so the whole area behind the data pointer is available to it.
+	 */
+	result_size = result->len + net_buf_tailroom(result);
+
 	DNS_SD_COUNT(&rec_num);
+
+	/* Held for the whole walk so an unregister returns only once the
+	 * table is no longer referenced.
+	 */
+	k_mutex_lock(&external_records_lock, K_FOREVER);
+
+	ext_rec_num = external_records_count;
 
 	while (rec_num > 0 || ext_rec_num > 0) {
 		/*
@@ -754,19 +857,24 @@ static void send_sd_response(int sock,
 			/* Construct the response */
 			if (service_type_enum) {
 				ret = dns_sd_handle_service_type_enum(record, addr4, addr6,
-						result->data, net_buf_max_len(result));
-				if (ret < 0) {
-					NET_DBG("dns_sd_handle_service_type_enum() failed (%d)",
-						ret);
-					continue;
-				}
-			} else {
+								      result->data, result_size);
+			} else if (qtype == DNS_RR_TYPE_PTR) {
 				ret = dns_sd_handle_ptr_query(iface, record, addr4, addr6,
-						result->data, net_buf_max_len(result), false);
-				if (ret < 0) {
-					NET_DBG("dns_sd_handle_ptr_query() failed (%d)", ret);
-					continue;
-				}
+							      result->data, result_size, false);
+			} else if (qtype == DNS_RR_TYPE_SRV) {
+				ret = dns_sd_handle_srv_query(iface, record, addr4, addr6,
+							      result->data, result_size);
+			} else if (qtype == DNS_RR_TYPE_TXT) {
+				ret = dns_sd_handle_txt_query(record, addr4, addr6,
+							      result->data, result_size);
+			} else {
+				continue;
+			}
+
+			if (ret < 0) {
+				NET_DBG("Failed to create DNS-SD %s response (%d)",
+					dns_qtype_to_str(qtype), ret);
+				continue;
 			}
 
 			result->len = ret;
@@ -782,6 +890,8 @@ static void send_sd_response(int sock,
 			}
 		}
 	}
+
+	k_mutex_unlock(&external_records_lock);
 }
 
 static int dns_read(int sock,
@@ -797,6 +907,7 @@ static int dns_read(int sock,
 	int family = src_addr->sa_family;
 	struct net_buf *result;
 	struct dns_msg_t dns_msg;
+	uint16_t dns_id = 0U;
 	int data_len;
 	int queries;
 	int ret;
@@ -815,7 +926,7 @@ static int dns_read(int sock,
 	dns_msg.msg = dns_data->data;
 	dns_msg.msg_size = data_len;
 
-	ret = mdns_unpack_query_header(&dns_msg, NULL);
+	ret = mdns_unpack_query_header(&dns_msg, &dns_id);
 	if (ret < 0) {
 		goto quit;
 	}
@@ -866,10 +977,12 @@ static int dns_read(int sock,
 				family == NET_AF_INET ? "IPv4" : "IPv6", "query",
 				hostname, ".local");
 			send_response(sock, family, src_addr, addrlen,
-				      result, qtype, recv_if);
-		} else if (IS_ENABLED(CONFIG_MDNS_RESPONDER_DNS_SD)
-			&& qtype == DNS_RR_TYPE_PTR) {
-			send_sd_response(sock, family, src_addr, addrlen, result, recv_if);
+				      result, qtype, recv_if, dns_id);
+		} else if (IS_ENABLED(CONFIG_MDNS_RESPONDER_DNS_SD) &&
+			   (qtype == DNS_RR_TYPE_PTR || qtype == DNS_RR_TYPE_SRV ||
+			    qtype == DNS_RR_TYPE_TXT)) {
+			send_sd_response(sock, family, src_addr, addrlen, result, recv_if,
+					 qtype);
 		}
 
 	} while (--queries);
@@ -1047,8 +1160,8 @@ static int send_probe(struct mdns_responder_context *ctx)
 	do {
 		local_port = sys_rand16_get() | 0x8000;
 		ret++;
-	} while (net_context_port_in_use(NET_IPPROTO_UDP, local_port,
-					 net_sad(&ctx->dispatcher.local_addr_storage)) &&
+	} while (net_socket_port_in_use(NET_IPPROTO_UDP, local_port,
+					net_sad(&ctx->dispatcher.local_addr_storage)) &&
 		 ret < PORT_COUNT);
 	if (ret >= PORT_COUNT) {
 		NET_ERR("No available port, %s probe fails!", "mDNS");
@@ -1377,78 +1490,48 @@ NET_MGMT_REGISTER_EVENT_HANDLER(mdns_conn_events, NET_EVENT_L4_DISCONNECTED,
 				mdns_conn_event_handler, NULL);
 #endif /* CONFIG_MDNS_RESPONDER_PROBE */
 
-#if defined(CONFIG_NET_IPV6)
-static void iface_ipv6_cb(struct net_if *iface, void *user_data)
+static int mdns_join_mcast_group(int sock, net_sa_family_t family, int ifindex)
 {
-	struct net_in6_addr *addr = user_data;
 	int ret;
 
-	if (!net_if_flag_is_set(iface, NET_IF_IPV6)) {
-		return;
+	if (IS_ENABLED(CONFIG_NET_IPV4) && family == NET_AF_INET) {
+		struct net_sockaddr_in maddr;
+		struct net_ip_mreqn mreqn = {0};
+
+		create_ipv4_addr(&maddr);
+		mreqn.imr_multiaddr = maddr.sin_addr;
+		mreqn.imr_ifindex = ifindex;
+
+		/* Pin multicast egress to this interface. */
+		(void)zsock_setsockopt(sock, NET_IPPROTO_IP, ZSOCK_IP_MULTICAST_IF, &mreqn,
+				       sizeof(mreqn));
+
+		ret = zsock_setsockopt(sock, NET_IPPROTO_IP, ZSOCK_IP_ADD_MEMBERSHIP, &mreqn,
+				       sizeof(mreqn));
+	} else if (IS_ENABLED(CONFIG_NET_IPV6) && family == NET_AF_INET6) {
+		struct net_sockaddr_in6 maddr;
+		struct net_ipv6_mreq mreq = {0};
+
+		create_ipv6_addr(&maddr);
+		mreq.ipv6mr_multiaddr = maddr.sin6_addr;
+		mreq.ipv6mr_ifindex = ifindex;
+
+		/* Pin multicast egress to this interface. */
+		(void)zsock_setsockopt(sock, NET_IPPROTO_IPV6, ZSOCK_IPV6_MULTICAST_IF, &ifindex,
+				       sizeof(ifindex));
+
+		ret = zsock_setsockopt(sock, NET_IPPROTO_IPV6, ZSOCK_IPV6_ADD_MEMBERSHIP, &mreq,
+				       sizeof(mreq));
+	} else {
+		return -EPFNOSUPPORT;
 	}
 
-	if (!mdns_iface_is_enabled(iface)) {
-		return;
-	}
-
-	ret = net_ipv6_mld_join(iface, addr);
 	if (ret < 0) {
-		NET_DBG("Cannot join %s IPv6 multicast group (%d)",
-			net_sprint_ipv6_addr(addr), ret);
+		return -errno;
 	}
+
+	return 0;
 }
-
-static void setup_ipv6_addr(struct net_sockaddr_in6 *local_addr)
-{
-	create_ipv6_addr(local_addr);
-
-	net_if_foreach(iface_ipv6_cb, &local_addr->sin6_addr);
-}
-#endif /* CONFIG_NET_IPV6 */
-
-#if defined(CONFIG_NET_IPV4)
-static void iface_ipv4_cb(struct net_if *iface, void *user_data)
-{
-	struct net_in_addr *addr = user_data;
-	int ret;
-
-	if (!net_if_flag_is_set(iface, NET_IF_IPV4)) {
-		return;
-	}
-
-	if (!mdns_iface_is_enabled(iface)) {
-		return;
-	}
-
-	if (!net_if_is_up(iface)) {
-		struct net_if_mcast_addr *maddr;
-
-		NET_DBG("Interface %d is down, not joining mcast group yet",
-			net_if_get_by_iface(iface));
-
-		maddr = net_if_ipv4_maddr_add(iface, addr);
-		if (!maddr) {
-			NET_DBG("Cannot add multicast address %s",
-				net_sprint_ipv4_addr(addr));
-		}
-
-		return;
-	}
-
-	ret = net_ipv4_igmp_join(iface, addr, NULL);
-	if (ret < 0) {
-		NET_DBG("Cannot add IPv4 multicast address to iface %d",
-			net_if_get_by_iface(iface));
-	}
-}
-
-static void setup_ipv4_addr(struct net_sockaddr_in *local_addr)
-{
-	create_ipv4_addr(local_addr);
-
-	net_if_foreach(iface_ipv4_cb, &local_addr->sin_addr);
-}
-#endif /* CONFIG_NET_IPV4 */
 
 static int dispatcher_cb(struct dns_socket_dispatcher *ctx, int sock,
 			 struct net_sockaddr *addr, size_t addrlen,
@@ -1627,7 +1710,7 @@ static int init_listener(void)
 			 MAX_IPV6_IFACE_COUNT, "IPv6", iface_count);
 	}
 
-	setup_ipv6_addr(&local_addr6);
+	create_ipv6_addr(&local_addr6);
 
 	ARRAY_FOR_EACH(ipv6_fds, i) {
 		ipv6_fds[i].fd = -1;
@@ -1689,6 +1772,15 @@ static int init_listener(void)
 			}
 		}
 
+		ret = mdns_join_mcast_group(v6, NET_AF_INET6, ifindex);
+		/* -ENETDOWN is expected on a down interface: igmp/mld keeps the group
+		 * registered and rejoins it at IF_UP, so no manual fallback is needed.
+		 */
+		if (ret < 0 && ret != -ENETDOWN) {
+			NET_DBG("Cannot join %s multicast group on iface %d (%d)", "IPv6", ifindex,
+				ret);
+		}
+
 		v6_ctx[i].sock = v6;
 		ret = -1;
 
@@ -1737,7 +1829,7 @@ static int init_listener(void)
 			 MAX_IPV4_IFACE_COUNT, "IPv4", iface_count);
 	}
 
-	setup_ipv4_addr(&local_addr4);
+	create_ipv4_addr(&local_addr4);
 
 	ARRAY_FOR_EACH(ipv4_fds, i) {
 		ipv4_fds[i].fd = -1;
@@ -1797,6 +1889,12 @@ static int init_listener(void)
 				NET_DBG("Bound %s sock %d to interface %d",
 					"IPv4", v4, ifindex);
 			}
+		}
+
+		ret = mdns_join_mcast_group(v4, NET_AF_INET, ifindex);
+		if (ret < 0 && ret != -ENETDOWN) {
+			NET_DBG("Cannot join %s multicast group on iface %d (%d)", "IPv4", ifindex,
+				ret);
 		}
 
 		v4_ctx[i].sock = v4;
@@ -1954,6 +2052,13 @@ int mdns_test_reinit_with_stale_slot(unsigned int slot)
 
 /* Leave the mDNS multicast groups on the given interface. init_listener()
  * rejoins them on the interfaces that remain enabled.
+ *
+ * The join goes through the socket API, but the leave stays on igmp/mld because
+ * a Zephyr socket close does not drop the membership: on native the group is
+ * registered on the net_if (net_ipv4_igmp_join/net_ipv6_mld_join), not on the
+ * socket, so this explicit leave is what actually drops it. On an offloaded
+ * interface the host socket close already dropped the host membership, so the
+ * same igmp/mld leave is a no-op against the Zephyr net_if.
  */
 static void mdns_leave_groups_cb(struct net_if *iface, void *user_data)
 {
@@ -2112,7 +2217,7 @@ static struct net_buf *create_unsolicited_mdns_answer(struct net_if *iface,
 		return NULL;
 	}
 
-	setup_dns_hdr(answer->data, 1);
+	setup_dns_hdr(answer->data, 1, 0, 0);
 	net_buf_add(answer, DNS_MSG_HEADER_SIZE);
 
 	answer_count = 0U;
@@ -2227,8 +2332,9 @@ static void send_dns_sd_announce(struct net_if *iface, int sock, net_sa_family_t
 	const struct net_in6_addr *addr6 = NULL;
 	const struct dns_sd_rec *record;
 	struct net_buf *answer;
+	size_t answer_size;
 	size_t rec_num;
-	size_t ext_rec_num = external_records_count;
+	size_t ext_rec_num;
 	int ret;
 
 	if (IS_ENABLED(CONFIG_NET_IPV4) && family == NET_AF_INET) {
@@ -2244,7 +2350,16 @@ static void send_dns_sd_announce(struct net_if *iface, int sock, net_sa_family_t
 		return;
 	}
 
+	/* The buffer is reused for every announcement, each encoded from
+	 * answer->data, so the usable size is the capacity of the empty buffer.
+	 */
+	answer_size = net_buf_tailroom(answer);
+
 	DNS_SD_COUNT(&rec_num);
+
+	k_mutex_lock(&external_records_lock, K_FOREVER);
+
+	ext_rec_num = external_records_count;
 
 	while (rec_num > 0 || ext_rec_num > 0) {
 		if (rec_num > 0) {
@@ -2256,7 +2371,7 @@ static void send_dns_sd_announce(struct net_if *iface, int sock, net_sa_family_t
 		}
 
 		ret = dns_sd_handle_ptr_query(iface, record, addr4, addr6, answer->data,
-					      net_buf_max_len(answer), true);
+					      answer_size, true);
 		if (ret < 0) {
 			continue;
 		}
@@ -2272,6 +2387,8 @@ static void send_dns_sd_announce(struct net_if *iface, int sock, net_sa_family_t
 			net_stats_update_dns_sent(iface);
 		}
 	}
+
+	k_mutex_unlock(&external_records_lock);
 
 	net_buf_unref(answer);
 }
@@ -2481,12 +2598,17 @@ static int mdns_responder_init(void)
 
 int mdns_responder_set_ext_records(const struct dns_sd_rec *records, size_t count)
 {
-	if (records == NULL || count == 0) {
+	/* NULL with a zero count unregisters the records */
+	if ((records == NULL && count > 0) || (records != NULL && count == 0)) {
 		return -EINVAL;
 	}
 
+	k_mutex_lock(&external_records_lock, K_FOREVER);
+
 	external_records = records;
 	external_records_count = count;
+
+	k_mutex_unlock(&external_records_lock);
 
 	return 0;
 }

@@ -1778,6 +1778,36 @@ error:
 }
 
 /**
+ * @brief Reset the driver-owned transfer status fields of a CCC payload
+ *
+ * @c num_xfer and @c err are outputs the controller driver is required to write
+ * (see @ref i3c_ccc_payload). This driver only writes them from the CMDR
+ * completion handler, which runs once per command response actually retired by
+ * the IP. A command that is dropped without producing a CMDR entry therefore
+ * never updates them, while the transaction as a whole can still complete
+ * successfully -- leaving whatever the caller happened to have in the payload.
+ *
+ * The CCC helpers in i3c_ccc.c declare their payloads as uninitialized stack
+ * locals and read @c num_xfer back as length, so that residue gets consumed
+ * as byte count. Clear the fields up front so an incomplete CCC reports zero
+ * bytes transferred rather than stack garbage.
+ *
+ * @see cdns_i3c_msgs_reset_status for the same treatment of private transfers.
+ *
+ * @param payload Pointer to CCC payload.
+ */
+static void cdns_i3c_ccc_reset_status(struct i3c_ccc_payload *payload)
+{
+	payload->ccc.num_xfer = 0U;
+	payload->ccc.err = I3C_ERROR_CE_NONE;
+
+	for (size_t i = 0; i < payload->targets.num_targets; i++) {
+		payload->targets.payloads[i].num_xfer = 0U;
+		payload->targets.payloads[i].err = I3C_ERROR_CE_NONE;
+	}
+}
+
+/**
  * @brief Send Common Command Code (CCC).
  *
  * @see i3c_do_ccc
@@ -1789,6 +1819,7 @@ error:
  */
 static int cdns_i3c_do_ccc(const struct device *dev, struct i3c_ccc_payload *payload)
 {
+	cdns_i3c_ccc_reset_status(payload);
 	return cdns_i3c_do_ccc_do(dev, payload, false, NULL, NULL);
 }
 
@@ -1808,6 +1839,7 @@ static int cdns_i3c_do_ccc(const struct device *dev, struct i3c_ccc_payload *pay
 static int cdns_i3c_do_ccc_cb(const struct device *dev, struct i3c_ccc_payload *payload,
 			      i3c_callback_t cb, void *userdata)
 {
+	cdns_i3c_ccc_reset_status(payload);
 	return cdns_i3c_do_ccc_do(dev, payload, true, cb, userdata);
 }
 #endif
@@ -2057,10 +2089,14 @@ static int cdns_i3c_configure(const struct device *dev, enum i3c_config_type typ
 		if ((ctrl_cfg->scl.i2c == 0U) || (ctrl_cfg->scl.i3c == 0U)) {
 			return -EINVAL;
 		}
+		if (!IN_RANGE(ctrl_cfg->tcas_ps, I3C_BUS_TCAS_MIN_PS, I3C_BUS_TCAS_MAX_PS)) {
+			return -EINVAL;
+		}
 
 		data->common.ctrl_config.scl.i3c = ctrl_cfg->scl.i3c;
 		data->common.ctrl_config.scl.i2c = ctrl_cfg->scl.i2c;
 		data->common.ctrl_config.scl_od_min = ctrl_cfg->scl_od_min;
+		data->common.ctrl_config.tcas_ps = ctrl_cfg->tcas_ps;
 
 		k_mutex_lock(&data->bus_lock, K_FOREVER);
 		pm_device_busy_set(dev);
@@ -2882,6 +2918,31 @@ error:
 }
 
 /**
+ * @brief Reset the driver-owned transfer status fields of private messages.
+ *
+ * @c num_xfer and @c err carry the same driver-writes-this contract as their
+ * CCC counterparts (see @ref i3c_msg) and are populated from the same CMDR
+ * completion handler, so a message whose command never retires a CMDR entry
+ * leaves both holding the caller's prior contents. Callers that size a
+ * subsequent access on @c num_xfer -- the documented way to learn how many
+ * bytes a target actually returned before EoD -- would then act on that
+ * residue. Clear the fields up front so an incomplete message reports zero
+ * bytes transferred rather than stale data.
+ *
+ * @see cdns_i3c_ccc_reset_status for the CCC payload equivalent.
+ *
+ * @param msgs Pointer to I3C messages.
+ * @param num_msgs Number of messages.
+ */
+static void cdns_i3c_msgs_reset_status(struct i3c_msg *msgs, uint8_t num_msgs)
+{
+	for (uint8_t i = 0; i < num_msgs; i++) {
+		msgs[i].num_xfer = 0U;
+		msgs[i].err = I3C_ERROR_CE_NONE;
+	}
+}
+
+/**
  * @brief Transfer messages in I3C mode.
  *
  * @see i3c_transfer
@@ -2896,6 +2957,7 @@ error:
 static int cdns_i3c_transfer(const struct device *dev, struct i3c_device_desc *target,
 			     struct i3c_msg *msgs, uint8_t num_msgs)
 {
+	cdns_i3c_msgs_reset_status(msgs, num_msgs);
 	return cdns_i3c_transfer_do(dev, target, msgs, num_msgs, false, NULL, NULL);
 }
 
@@ -2918,6 +2980,7 @@ static int cdns_i3c_transfer_cb(const struct device *dev, struct i3c_device_desc
 				struct i3c_msg *msgs, uint8_t num_msgs, i3c_callback_t cb,
 				void *userdata)
 {
+	cdns_i3c_msgs_reset_status(msgs, num_msgs);
 	return cdns_i3c_transfer_do(dev, target, msgs, num_msgs, true, cb, userdata);
 }
 #endif
@@ -4206,7 +4269,8 @@ static DEVICE_API(i3c, api) = {
 			.common.ctrl_config.scl_od_min.high_ns =                                   \
 				DT_INST_PROP(n, od_thigh_min_ns),                                  \
 			.common.ctrl_config.scl_od_min.low_ns =                                    \
-				DT_INST_PROP(n, od_tlow_min_ns),))                                 \
+				DT_INST_PROP(n, od_tlow_min_ns),                                   \
+			.common.ctrl_config.tcas_ps = DT_INST_PROP(n, tcas_ps),))                  \
 	};                                                                                         \
 	DEVICE_DT_INST_DEFINE(n, cdns_i3c_bus_init, NULL, &i3c_data_##n, &i3c_config_##n,          \
 			      POST_KERNEL, CONFIG_I3C_CONTROLLER_INIT_PRIORITY, &api);             \

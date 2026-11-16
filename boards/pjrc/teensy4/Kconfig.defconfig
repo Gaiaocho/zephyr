@@ -6,12 +6,10 @@
 
 if BOARD_TEENSY40 || BOARD_TEENSY41 || BOARD_TEENSYMM
 
-config BUILD_OUTPUT_HEX
-	bool
+configdefault BUILD_OUTPUT_HEX
 	default y
 
-configdefault NET_L2_ETHERNET
-	default n if BOARD_TEENSY40
+configdefault ETH_DRIVER
 	default y if BOARD_TEENSY41
 
 endif # BOARD_TEENSY40 || BOARD_TEENSY41

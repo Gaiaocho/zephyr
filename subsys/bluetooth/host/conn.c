@@ -69,6 +69,10 @@ K_FIFO_DEFINE(free_tx);
 #if defined(CONFIG_BT_CONN_TX_NOTIFY_WQ)
 static struct k_work_q conn_tx_workq;
 static K_KERNEL_STACK_DEFINE(conn_tx_workq_thread_stack, CONFIG_BT_CONN_TX_NOTIFY_WQ_STACK_SIZE);
+
+/* See the same check for the RX workqueue in hci_core.c */
+BUILD_ASSERT(CONFIG_BT_CONN_TX_NOTIFY_WQ_PRIO < CONFIG_NUM_COOP_PRIORITIES,
+	     "The Bluetooth connection TX notify workqueue needs a cooperative priority");
 #endif /* CONFIG_BT_CONN_TX_NOTIFY_WQ */
 
 static void tx_free(struct bt_conn_tx *tx);
@@ -139,10 +143,11 @@ static struct bt_conn sco_conns[CONFIG_BT_MAX_SCO_CONN];
 #if defined(CONFIG_BT_CONN_TX)
 static void frag_destroy(struct net_buf *buf);
 
-/* Storage for fragments (views) into the upper layers' PDUs. */
-/* TODO: remove user-data requirements */
-NET_BUF_POOL_FIXED_DEFINE(fragments, CONFIG_BT_CONN_FRAG_COUNT, 0,
-			  CONFIG_BT_CONN_TX_USER_DATA_SIZE, frag_destroy);
+/* Storage for fragments (views) into the upper layers' PDUs. No user data:
+ * the HCI driver may use a sent fragment's user data, so the view metadata
+ * lives in frag_md_pool below instead.
+ */
+NET_BUF_POOL_FIXED_DEFINE(fragments, CONFIG_BT_CONN_FRAG_COUNT, 0, 0, frag_destroy);
 
 struct frag_md {
 	struct bt_buf_view_meta view_meta;
@@ -344,7 +349,7 @@ void bt_conn_tx_notify(struct bt_conn *conn, bool wait_for_completion)
 		tx_notify_process(conn);
 	} else {
 		struct k_work_sync sync;
-		int err;
+		__maybe_unused int err;
 
 		err = k_work_submit_to_queue(tx_notify_workqueue_get(), &conn->tx_complete_work);
 		__ASSERT(err >= 0, "couldn't submit (err %d)", err);
@@ -647,6 +652,15 @@ static bool is_acl_conn(struct bt_conn *conn)
 	return bt_conn_is_le(conn) || bt_conn_is_br(conn);
 }
 
+static bool is_bis_tx_conn(struct bt_conn *conn)
+{
+#if defined(CONFIG_BT_ISO_BROADCASTER)
+	return bt_conn_is_iso(conn) && conn->iso.info.type == BT_ISO_CHAN_TYPE_BROADCASTER;
+#else
+	return false;
+#endif /* CONFIG_BT_ISO_BROADCASTER */
+}
+
 static int send_buf(struct bt_conn *conn, struct net_buf *buf,
 		    size_t len, bt_conn_tx_cb_t cb, void *ud)
 {
@@ -675,9 +689,11 @@ static int send_buf(struct bt_conn *conn, struct net_buf *buf,
 	/* Acquire the right to send 1 packet to the controller */
 	if (k_sem_take(bt_conn_get_pkts(conn), K_NO_WAIT)) {
 		/* This shouldn't happen now that we acquire the resources
-		 * before calling `send_buf` (in `get_conn_ready`). We say
-		 * "acquire" as `tx_processor()` is not re-entrant and the
-		 * thread is non-preemptible. So the sem value shouldn't change.
+		 * before calling `send_buf` (in `get_conn_ready`). All
+		 * consumers of this semaphore run under the host lock
+		 * (held across the whole TX processing pass), and givers
+		 * only ever increase the count. So the sem value cannot
+		 * have decreased since the get_conn_ready() check.
 		 */
 		__ASSERT(0, "No controller bufs");
 
@@ -815,29 +831,57 @@ static bool acl_has_data(struct bt_conn *conn)
 }
 #endif	/* defined(CONFIG_BT_CONN) */
 
+/* Whether c is an ACL connection that can send and holds as many packets in
+ * the controller as conn or fewer, so that conn gives way to it
+ */
+static bool can_take_turn(struct bt_conn *conn, struct bt_conn *c)
+{
+	struct k_sem *pkts;
+
+	if ((c == conn) || !is_acl_conn(c) || (c->state != BT_CONN_CONNECTED) ||
+	    (c->has_data == NULL) || !c->has_data(c) ||
+	    atomic_test_bit(c->flags, BT_CONN_TX_FAILED)) {
+		return false;
+	}
+
+	pkts = bt_conn_get_pkts(c);
+
+	return (pkts != NULL) && (k_sem_count_get(pkts) > 0U) &&
+	       (atomic_get(&c->in_ll) <= atomic_get(&conn->in_ll));
+}
+
 /* Connection "Scheduler" of sorts:
  *
  * Will try to get the optimal number of queued buffers for the connection.
  *
- * Partitions the controller's buffers to each connection according to some
- * heuristic. This is made to be tunable, fairness, simplicity, throughput etc.
- *
- * In the future, this will be a hook exposed to the application.
+ * Decides when to move on to the next connection. How the controller's
+ * buffers are shared between connections is up to get_conn_ready().
  */
 static bool should_stop_tx(struct bt_conn *conn)
 {
+	struct bt_conn *c;
+
 	LOG_DBG("%p", conn);
 
 	if (conn->state != BT_CONN_CONNECTED) {
 		return true;
 	}
 
-	/* TODO: This function should be overridable by the application: they
-	 * should be able to provide their own heuristic.
-	 */
 	if (!conn->has_data(conn)) {
 		LOG_DBG("No more data for %p", conn);
 		return true;
+	}
+
+	/* Give way to another ACL connection that can send and holds as many
+	 * packets in the controller or fewer. Otherwise a connection whose
+	 * packets complete quickly keeps its place at the head of the list.
+	 * ISO channels do not take part.
+	 */
+	SYS_SLIST_FOR_EACH_CONTAINER(&bt_dev.le.conn_ready, c, _conn_ready) {
+		if (is_acl_conn(conn) && can_take_turn(conn, c)) {
+			LOG_DBG("%p gives way to %p", conn, c);
+			return true;
+		}
 	}
 
 	/* Queue only 3 buffers per-conn for now */
@@ -865,11 +909,11 @@ void bt_conn_data_ready(struct bt_conn *conn)
 
 	bt_conn_ref(conn);
 
-	/* This function is the only function which accesses conn_ready list  that can be called
-	 * from a preemptive thread context, therefore requires a critical section to ensure that
-	 * the conn_ready list is not modified while we are checking and appending to it.
+	/* The conn_ready list is only ever modified under the host lock:
+	 * here (append, any thread context) and in get_conn_ready() (remove,
+	 * TX processor context, which holds the lock across the whole pass).
 	 */
-	k_sched_lock();
+	bt_dev_lock();
 
 	if (!sys_slist_find(&bt_dev.le.conn_ready, &conn->_conn_ready, NULL)) {
 		sys_slist_append(&bt_dev.le.conn_ready, &conn->_conn_ready);
@@ -879,7 +923,7 @@ void bt_conn_data_ready(struct bt_conn *conn)
 		added = false;
 	}
 
-	k_sched_unlock();
+	bt_dev_unlock();
 
 	if (!added) {
 		bt_conn_unref(conn);
@@ -894,6 +938,24 @@ void bt_conn_data_ready(struct bt_conn *conn)
 static bool cannot_send_to_controller(struct bt_conn *conn)
 {
 	return k_sem_count_get(bt_conn_get_pkts(conn)) == 0;
+}
+
+static bool held_back_by_disable(struct bt_conn *conn)
+{
+	/* bt_disable() clears BT_DEV_READY and takes the connections down only
+	 * once the controller has been reset. Until then what is queued for
+	 * them stays where it is, to be dealt with by the teardown as for any
+	 * connection that goes away with data queued.
+	 */
+	return conn->state == BT_CONN_CONNECTED && !atomic_test_bit(bt_dev.flags, BT_DEV_READY);
+}
+
+static bool held_back_by_tx_failure(struct bt_conn *conn)
+{
+	/* A connection that failed to send is being disconnected, see
+	 * bt_conn_tx_processor().
+	 */
+	return conn->state == BT_CONN_CONNECTED && atomic_test_bit(conn->flags, BT_CONN_TX_FAILED);
 }
 
 static bool dont_have_viewbufs(void)
@@ -922,10 +984,106 @@ __maybe_unused static bool dont_have_methods(struct bt_conn *conn)
 		(conn->has_data == NULL);
 }
 
+/* The ACL buffer pools of the controller: one for LE, and one for BR/EDR if it
+ * is enabled. Any further pool is counted without caching.
+ */
+#define ACL_TX_POOLS (1U + (IS_ENABLED(CONFIG_BT_CLASSIC) ? 1U : 0U))
+
+/* The connections on a pool that have data queued or packets in flight,
+ * counted once per pass of the TX processor
+ */
+struct tx_pool_users {
+	struct k_sem *pkts;
+	unsigned int n;
+};
+
+#if defined(CONFIG_BT_CONN)
+static unsigned int tx_pool_users_count(struct k_sem *pkts)
+{
+	unsigned int n = 0U;
+
+	ARRAY_FOR_EACH_PTR(acl_conns, c) {
+		if (c->state != BT_CONN_CONNECTED || bt_conn_get_pkts(c) != pkts) {
+			continue;
+		}
+
+		if (atomic_get(&c->in_ll) > 0 || (c->has_data != NULL && c->has_data(c))) {
+			n++;
+		}
+	}
+
+	return n;
+}
+
+static unsigned int tx_pool_users_get(struct tx_pool_users *users, size_t len,
+				      struct k_sem *pkts)
+{
+	unsigned int n;
+	size_t i;
+
+	for (i = 0; i < len && users[i].pkts != NULL; i++) {
+		if (users[i].pkts == pkts) {
+			return users[i].n;
+		}
+	}
+
+	n = tx_pool_users_count(pkts);
+
+	/* Count without caching once every slot is taken */
+	if (i < len) {
+		users[i].pkts = pkts;
+		users[i].n = n;
+	}
+
+	return n;
+}
+#endif /* CONFIG_BT_CONN */
+
+/* Whether a connection holds fewer of its pool's buffers than its share. The
+ * share is the pool's buffers, or the TX contexts if there are fewer, split
+ * evenly between the connections on that pool that have data queued or
+ * packets in flight, and is at least 1.
+ */
+static bool below_tx_share(struct bt_conn *conn, struct tx_pool_users *users, size_t len)
+{
+#if defined(CONFIG_BT_CONN)
+	struct k_sem *pkts;
+	unsigned int total;
+	unsigned int n;
+
+	/* ISO channels have buffers of their own, so the share does not
+	 * hold them back
+	 */
+	if (!is_acl_conn(conn)) {
+		return true;
+	}
+
+	pkts = bt_conn_get_pkts(conn);
+	total = MIN(pkts->limit, ARRAY_SIZE(conn_tx));
+	n = MAX(tx_pool_users_get(users, len, pkts), 1U);
+
+	return atomic_get(&conn->in_ll) < MAX(total / n, 1U);
+#else
+	ARG_UNUSED(users);
+	ARG_UNUSED(len);
+
+	/* Only ISO channels, which are not shared */
+	return true;
+#endif /* CONFIG_BT_CONN */
+}
+
 static struct bt_conn *get_conn_ready(void)
 {
 	struct bt_conn *conn, *tmp;
+	struct bt_conn *first = NULL;
 	sys_snode_t *prev = NULL;
+	sys_snode_t *first_prev = NULL;
+	struct tx_pool_users users[ACL_TX_POOLS] = {0};
+
+	/* Called from the TX processor with the host lock held; the lock
+	 * serializes conn_ready list access against bt_conn_data_ready().
+	 */
+	BT_DEV_LOCK_ASSERT();
 
 	if (dont_have_viewbufs()) {
 		/* We will get scheduled again when the (view) buffers are freed. If you
@@ -939,8 +1097,21 @@ static struct bt_conn *get_conn_ready(void)
 		__ASSERT_NO_MSG(tmp != conn);
 
 		/* Iterate over the list of connections that have data to send
-		 * and return the first one that can be sent.
+		 * and take the first one that can be sent and is below its share
+		 * of the controller's buffers, else the first one that can be sent.
 		 */
+
+		if (held_back_by_disable(conn)) {
+			LOG_DBG("not ready, holding back %p", conn);
+			prev = &conn->_conn_ready;
+			continue;
+		}
+
+		if (held_back_by_tx_failure(conn)) {
+			LOG_DBG("sending failed, holding back %p", conn);
+			prev = &conn->_conn_ready;
+			continue;
+		}
 
 		if (cannot_send_to_controller(conn)) {
 			/* When buffers are full, try next connection. */
@@ -963,6 +1134,24 @@ static struct bt_conn *get_conn_ready(void)
 			continue;
 		}
 
+		if (below_tx_share(conn, users, ARRAY_SIZE(users))) {
+			break;
+		}
+
+		if (first == NULL) {
+			first = conn;
+			first_prev = prev;
+		}
+
+		prev = &conn->_conn_ready;
+	}
+
+	if (conn == NULL) {
+		conn = first;
+		prev = first_prev;
+	}
+
+	if (conn != NULL) {
 		if (should_stop_tx(conn)) {
 			/* Move reference off the list */
 			__ASSERT_NO_MSG(prev != &conn->_conn_ready);
@@ -1010,6 +1199,59 @@ void bt_conn_suspend_tx(bool suspend)
 }
 #endif	/* CONFIG_BT_TESTING */
 
+static int disconnect_conn(struct bt_conn *conn)
+{
+#if defined(CONFIG_BT_ISO_UNICAST)
+	if (bt_conn_is_iso(conn)) {
+		/* Takes the state of the ISO channel along */
+		return bt_iso_chan_disconnect(conn->iso.chan);
+	}
+#endif /* CONFIG_BT_ISO_UNICAST */
+
+	return bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+}
+
+static void disconnect_after_tx_failure(struct bt_conn *conn, void *data)
+{
+	int err;
+
+	ARG_UNUSED(data);
+
+	if (!atomic_test_bit(conn->flags, BT_CONN_TX_FAILED)) {
+		return;
+	}
+
+	if (conn->state != BT_CONN_CONNECTED) {
+		atomic_clear_bit(conn->flags, BT_CONN_TX_FAILED);
+		return;
+	}
+
+	/* The flag holds the connection back for as long as it is connected,
+	 * so it stays set while the connection is being disconnected.
+	 */
+	err = disconnect_conn(conn);
+	if (err == 0) {
+		return;
+	}
+
+	/* Still connected, so let it go on sending */
+	LOG_WRN("Unable to disconnect %p (err %d)", conn, err);
+	atomic_clear_bit(conn->flags, BT_CONN_TX_FAILED);
+	bt_tx_irq_raise();
+}
+
+static void tx_failure_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	bt_conn_foreach(BT_CONN_TYPE_ALL, disconnect_after_tx_failure, NULL);
+}
+
+/* Disconnecting waits for an HCI command, which the TX processor may not do:
+ * it holds the host lock, see tx_processor().
+ */
+static K_WORK_DEFINE(tx_failure_work, tx_failure_handler);
+
 void bt_conn_tx_processor(void)
 {
 	LOG_DBG("start");
@@ -1047,12 +1289,15 @@ void bt_conn_tx_processor(void)
 	 */
 	buf = conn->tx_data_pull(conn, conn_mtu(conn), &buf_len);
 	if (!buf) {
-		/* Either there is no more data, or the buffer is already in-use
-		 * by a view on it. In both cases, the TX processor will be
-		 * triggered again, either by the view's destroy callback, or by
-		 * the upper layer when it has more data.
-		 */
 		LOG_DBG("no buf returned");
+
+		/* A connection without data left leaves the list on the next pass:
+		 * run that pass now while the list holds connections, so that those
+		 * behind it are served without waiting for a completion or new data.
+		 */
+		if (!conn->has_data(conn) && !sys_slist_is_empty(&bt_dev.le.conn_ready)) {
+			goto raise_and_exit;
+		}
 
 		goto exit;
 	}
@@ -1073,8 +1318,24 @@ void bt_conn_tx_processor(void)
 	int err = send_buf(conn, buf, buf_len, cb, ud);
 
 	if (err) {
+		if (is_bis_tx_conn(conn)) {
+			/* A BIS cannot be disconnected on its own, and
+			 * terminating its BIG would take the other BISes down
+			 * too: what failed is lost, and sending goes on.
+			 */
+			LOG_ERR("Failed to send on BIS %p (err %d)", conn, err);
+			goto raise_and_exit;
+		}
+
 		LOG_ERR("Fatal error (%d). Disconnecting %p", err, conn);
-		bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		atomic_set_bit(conn->flags, BT_CONN_TX_FAILED);
+		err = bt_work_submit(&tx_failure_work);
+		if (err < 0) {
+			/* Nothing is going to disconnect the connection */
+			LOG_ERR("Failed to submit the disconnect (err %d)", err);
+			atomic_clear_bit(conn->flags, BT_CONN_TX_FAILED);
+		}
+
 		goto exit;
 	}
 
@@ -1093,6 +1354,11 @@ static void process_unack_tx(struct bt_conn *conn)
 {
 	LOG_DBG("%p", conn);
 
+	/* What was sent in part is not continued on the object's next
+	 * connection: a central CIS keeps its object, without it being zeroed.
+	 */
+	conn->next_is_frag = false;
+
 	/* Return any unacknowledged packets */
 	while (1) {
 		struct bt_conn_tx *tx;
@@ -1109,6 +1375,7 @@ static void process_unack_tx(struct bt_conn *conn)
 
 		conn_tx_destroy(conn, tx);
 		k_sem_give(bt_conn_get_pkts(conn));
+		atomic_dec(&conn->in_ll);
 	}
 }
 
@@ -1209,6 +1476,11 @@ void bt_conn_set_state(struct bt_conn *conn, bt_conn_state_t state)
 
 		break;
 	case BT_CONN_DISCONNECTED:
+		/* The flag is not to carry over to the next connection on this
+		 * object, which is not always zeroed first: a central CIS keeps
+		 * its object.
+		 */
+		atomic_clear_bit(conn->flags, BT_CONN_TX_FAILED);
 #if defined(CONFIG_BT_CONN)
 		if (bt_conn_is_sco(conn)) {
 			if (IS_ENABLED(CONFIG_BT_CLASSIC)) {
@@ -1590,6 +1862,18 @@ struct net_buf *bt_conn_create_pdu_timeout(struct net_buf_pool *pool,
 	if (!K_TIMEOUT_EQ(timeout, K_NO_WAIT) &&
 	    k_current_get() == k_work_queue_thread_get(&k_sys_work_q)) {
 		LOG_WRN("Timeout discarded. No blocking in syswq.");
+		timeout = K_NO_WAIT;
+	}
+
+	/*
+	 * Only K_FOREVER is forced to K_NO_WAIT here: it is the only timeout
+	 * that blocks bt_workq indefinitely, since bt_workq is also what
+	 * releases the buffers. Bounded timeouts (e.g. BT_L2CAP_RTX_TIMEOUT)
+	 * only stall RX processing briefly and are intentionally left
+	 * untouched.
+	 */
+	if (K_TIMEOUT_EQ(timeout, K_FOREVER) && bt_is_work_thread()) {
+		LOG_DBG("Timeout K_FOREVER discarded. No blocking in bt_workq.");
 		timeout = K_NO_WAIT;
 	}
 
@@ -2655,7 +2939,8 @@ static int start_security(struct bt_conn *conn)
 
 int bt_conn_set_security(struct bt_conn *conn, bt_security_t sec)
 {
-	bool force_pair;
+	bt_security_t prev_sec_level;
+	bool force_pair, prev_force_pair;
 	int err;
 
 	if (!bt_conn_is_le(conn) && !bt_conn_is_br(conn)) {
@@ -2683,13 +2968,20 @@ int bt_conn_set_security(struct bt_conn *conn, bt_security_t sec)
 		return 0;
 	}
 
+	prev_sec_level = conn->required_sec_level;
+	prev_force_pair = atomic_test_bit(conn->flags, BT_CONN_FORCE_PAIR);
+
 	atomic_set_bit_to(conn->flags, BT_CONN_FORCE_PAIR, force_pair);
 	conn->required_sec_level = sec;
 
 	err = start_security(conn);
 
-	/* reset required security level in case of error */
-	if (err) {
+	if (err == -EALREADY) {
+		/* keep the settings of the request already in flight */
+		conn->required_sec_level = prev_sec_level;
+		atomic_set_bit_to(conn->flags, BT_CONN_FORCE_PAIR, prev_force_pair);
+	} else if (err) {
+		/* reset required security level in case of error */
 		conn->required_sec_level = conn->sec_level;
 	}
 
@@ -4003,7 +4295,7 @@ int bt_conn_le_create_auto(const struct bt_conn_le_create_param *create_param,
 		return -EINVAL;
 	}
 
-	if (!bt_id_scan_random_addr_check()) {
+	if (!bt_id_conn_random_addr_check()) {
 		return -EINVAL;
 	}
 
@@ -4094,7 +4386,7 @@ static int conn_le_create_common_checks(const bt_addr_le_t *peer,
 		return -EALREADY;
 	}
 
-	if (!bt_id_scan_random_addr_check()) {
+	if (!bt_id_conn_random_addr_check()) {
 		LOG_DBG("Conn check failed: invalid random address.");
 		return -EINVAL;
 	}

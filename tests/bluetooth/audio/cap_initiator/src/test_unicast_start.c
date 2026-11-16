@@ -25,6 +25,7 @@
 #include <zephyr/sys/__assert.h>
 #include <zephyr/sys/slist.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/sys/util_macro.h>
 #include <zephyr/toolchain.h>
 #include <zephyr/ztest_assert.h>
 #include <zephyr/ztest_test.h>
@@ -66,6 +67,7 @@ static void cap_initiator_test_unicast_start_fixture_init(
 	struct cap_initiator_test_unicast_start_fixture *fixture)
 {
 	size_t stream_cnt = 0U;
+	size_t pair_cnt = 0U;
 	size_t pair_idx = 0U;
 	int err;
 
@@ -76,28 +78,44 @@ static void cap_initiator_test_unicast_start_fixture_init(
 		test_conn_init(&fixture->conns[i], i);
 	}
 
-	while (stream_cnt < ARRAY_SIZE(fixture->group_stream_param)) {
-		const enum bt_audio_dir dir = INDEX_TO_DIR(stream_cnt);
+	while (stream_cnt < ARRAY_SIZE(fixture->group_stream_param) &&
+	       pair_cnt < ARRAY_SIZE(fixture->group_pair_params)) {
+		struct bt_cap_unicast_group_stream_pair_param *pair_param =
+			&fixture->group_pair_params[pair_idx];
+		struct bt_cap_unicast_group_stream_param *stream_param =
+			&fixture->group_stream_param[stream_cnt];
 
-		pair_idx = stream_cnt / 2U;
+		stream_param->stream = &fixture->cap_streams[stream_cnt];
+		stream_param->qos_cfg = &fixture->preset.qos;
 
-		fixture->group_stream_param[stream_cnt].stream = &fixture->cap_streams[stream_cnt];
-		fixture->group_stream_param[stream_cnt].qos_cfg = &fixture->preset.qos;
+		if (IS_ENABLED(CONFIG_BT_BAP_UNICAST_CLIENT_ASE_SNK) &&
+		    IS_ENABLED(CONFIG_BT_BAP_UNICAST_CLIENT_ASE_SRC)) {
+			const enum bt_audio_dir dir = INDEX_TO_DIR(stream_cnt);
 
-		/* Switch between sink and source depending on index*/
-		if (dir == BT_AUDIO_DIR_SINK) {
-			fixture->group_pair_params[pair_idx].tx_param =
-				&fixture->group_stream_param[stream_cnt];
-		} else {
-			fixture->group_pair_params[pair_idx].rx_param =
-				&fixture->group_stream_param[stream_cnt];
+			/* Switch between sink and source depending on index*/
+			if (dir == BT_AUDIO_DIR_SINK) {
+				pair_param->tx_param = stream_param;
+			} else {
+				pair_param->rx_param = stream_param;
+			}
+			stream_cnt++;
+			pair_idx = stream_cnt / 2U;
+			pair_cnt = DIV_ROUND_UP(stream_cnt, 2U);
+		} else if (IS_ENABLED(CONFIG_BT_BAP_UNICAST_CLIENT_ASE_SNK)) {
+			pair_param->tx_param = stream_param;
+			stream_cnt++;
+			pair_idx++;
+			pair_cnt++;
+		} else { /* CONFIG_BT_BAP_UNICAST_CLIENT_ASE_SRC */
+			pair_param->rx_param = stream_param;
+			stream_cnt++;
+			pair_idx++;
+			pair_cnt++;
 		}
-
-		stream_cnt++;
 	}
 
 	fixture->group_param.packing = BT_ISO_PACKING_SEQUENTIAL;
-	fixture->group_param.params_count = pair_idx + 1U;
+	fixture->group_param.params_count = pair_cnt;
 	fixture->group_param.params = fixture->group_pair_params;
 
 	err = bt_cap_unicast_group_create(&fixture->group_param, &fixture->unicast_group);
@@ -117,40 +135,79 @@ static void *cap_initiator_test_unicast_start_setup(void)
 static void init_default_params(struct cap_initiator_test_unicast_start_fixture *fixture)
 {
 	/* Setup default params */
+	fixture->audio_start_param.count = 0U;
 	ARRAY_FOR_EACH(fixture->audio_start_stream_params, i) {
 		struct bt_cap_unicast_audio_start_stream_param *stream_param =
 			&fixture->audio_start_stream_params[i];
 
-		/* We pair 2 streams, so only increase conn_index every 2nd stream and otherwise
-		 * round robin on all conns
-		 */
-		const size_t conn_index = (i / 2U) % ARRAY_SIZE(fixture->conns);
-		const size_t ep_index = i / (ARRAY_SIZE(fixture->conns) * 2U);
-		const enum bt_audio_dir dir = INDEX_TO_DIR(i);
+		if (fixture->cap_streams[i].bap_stream.group == NULL) {
+			break;
+		}
 
 		stream_param->stream = &fixture->cap_streams[i];
 		stream_param->codec_cfg = &fixture->preset.codec_cfg;
 
-		/* Distribute the streams like
-		 * [0]: conn[0] snk[0]
-		 * [1]: conn[0] src[0]
-		 * [2]: conn[1] snk[0]
-		 * [3]: conn[1] src[0]
-		 * [4]: conn[0] snk[1]
-		 * [5]: conn[0] src[1]
-		 * [6]: conn[1] snk[1]
-		 * [7]: conn[1] src[1]
-		 */
-		stream_param->member.member = &fixture->conns[conn_index];
-		if (dir == BT_AUDIO_DIR_SINK) {
+		if (IS_ENABLED(CONFIG_BT_BAP_UNICAST_CLIENT_ASE_SNK) &&
+		    IS_ENABLED(CONFIG_BT_BAP_UNICAST_CLIENT_ASE_SRC)) {
+			/* We pair 2 streams, so only increase conn_index every 2nd stream and
+			 * otherwise round robin on all conns
+			 */
+			const size_t conn_index = (i / 2U) % ARRAY_SIZE(fixture->conns);
+			const size_t ep_index = i / (ARRAY_SIZE(fixture->conns) * 2U);
+			const enum bt_audio_dir dir = INDEX_TO_DIR(i);
+
+			/* Distribute the streams like
+			 * [0]: conn[0] snk[0]
+			 * [1]: conn[0] src[0]
+			 * [2]: conn[1] snk[0]
+			 * [3]: conn[1] src[0]
+			 * [4]: conn[0] snk[1]
+			 * [5]: conn[0] src[1]
+			 * [6]: conn[1] snk[1]
+			 * [7]: conn[1] src[1]
+			 */
+			stream_param->member.member = &fixture->conns[conn_index];
+			if (dir == BT_AUDIO_DIR_SINK) {
+				stream_param->ep = fixture->snk_eps[conn_index][ep_index];
+			} else {
+				stream_param->ep = fixture->src_eps[conn_index][ep_index];
+			}
+		} else if (IS_ENABLED(CONFIG_BT_BAP_UNICAST_CLIENT_ASE_SNK)) {
+			const size_t conn_index = i % ARRAY_SIZE(fixture->conns);
+			const size_t ep_index = i / ARRAY_SIZE(fixture->conns);
+
+			/* Distribute the streams like
+			 * [0]: conn[0] snk[0]
+			 * [1]: conn[1] snk[0]
+			 * [2]: conn[0] snk[1]
+			 * [3]: conn[1] snk[1]
+			 * [4]: conn[0] snk[2]
+			 * [5]: conn[1] snk[2]
+			 */
+
+			stream_param->member.member = &fixture->conns[conn_index];
 			stream_param->ep = fixture->snk_eps[conn_index][ep_index];
-		} else {
+		} else { /* CONFIG_BT_BAP_UNICAST_CLIENT_ASE_SRC */
+			const size_t conn_index = i % ARRAY_SIZE(fixture->conns);
+			const size_t ep_index = i / ARRAY_SIZE(fixture->conns);
+
+			/* Distribute the streams like
+			 * [0]: conn[0] src[0]
+			 * [1]: conn[1] src[0]
+			 * [2]: conn[0] src[1]
+			 * [3]: conn[1] src[1]
+			 * [4]: conn[0] src[2]
+			 * [5]: conn[1] src[2]
+			 */
+
+			stream_param->member.member = &fixture->conns[conn_index];
 			stream_param->ep = fixture->src_eps[conn_index][ep_index];
 		}
+
+		fixture->audio_start_param.count++;
 	}
 
 	fixture->audio_start_param.type = BT_CAP_SET_TYPE_AD_HOC;
-	fixture->audio_start_param.count = CONFIG_BT_BAP_UNICAST_CLIENT_GROUP_STREAM_COUNT;
 	fixture->audio_start_param.stream_params = fixture->audio_start_stream_params;
 }
 
@@ -189,20 +246,26 @@ static void cap_initiator_test_unicast_start_after(void *f)
 	if (fixture->unicast_group != NULL) {
 		struct bt_cap_stream
 			*cap_stream_ptrs[CONFIG_BT_BAP_UNICAST_CLIENT_GROUP_STREAM_COUNT];
-		const struct bt_cap_unicast_audio_stop_param param = {
+		struct bt_cap_unicast_audio_stop_param param = {
 			.type = BT_CAP_SET_TYPE_AD_HOC,
-			.count = ARRAY_SIZE(fixture->cap_streams),
+			.count = 0U,
 			.streams = cap_stream_ptrs,
 			.release = true,
 		};
 
 		ARRAY_FOR_EACH(cap_stream_ptrs, idx) {
-			cap_stream_ptrs[idx] = &fixture->cap_streams[idx];
+			/* Stop and release only streams that have been configured */
+			if (fixture->cap_streams[idx].bap_stream.conn != NULL) {
+				cap_stream_ptrs[param.count] = &fixture->cap_streams[idx];
+				param.count++;
+			}
 		}
 
-		err = bt_cap_initiator_unicast_audio_stop(&param);
-		if (err != 0) {
-			printk("Failed to stop unicast audio (err %d)\n", err);
+		if (param.count > 0) {
+			err = bt_cap_initiator_unicast_audio_stop(&param);
+			if (err != 0) {
+				printk("Failed to stop unicast audio (err %d)\n", err);
+			}
 		}
 
 		err = bt_cap_unicast_group_delete(fixture->unicast_group);
@@ -227,6 +290,18 @@ static ZTEST_F(cap_initiator_test_unicast_start, test_initiator_unicast_start)
 
 	err = bt_cap_initiator_unicast_audio_start(&fixture->audio_start_param);
 	zassert_equal(err, 0, "Unexpected return value %d", err);
+
+	/* All streams started from the idle state, so all subprocedures were performed */
+	zexpect_call_count("bt_cap_initiator_cb.unicast_start_codec_configured", 1,
+			   mock_cap_initiator_unicast_start_codec_configured_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_start_qos_configured", 1,
+			   mock_cap_initiator_unicast_start_qos_configured_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_start_enabled", 1,
+			   mock_cap_initiator_unicast_start_enabled_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_start_connected", 1,
+			   mock_cap_initiator_unicast_start_connected_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_start_started", 1,
+			   mock_cap_initiator_unicast_start_started_cb_fake.call_count);
 
 	zexpect_call_count("bt_cap_initiator_cb.unicast_start_complete_cb", 1,
 			   mock_cap_initiator_unicast_start_complete_cb_fake.call_count);
@@ -421,8 +496,17 @@ static ZTEST_F(cap_initiator_test_unicast_start,
 	err = bt_cap_initiator_unicast_audio_start(&fixture->audio_start_param);
 	zassert_equal(err, 0, "Unexpected return value %d", err);
 
+	/* The streams had a different codec configuration, so the Codec Configuration
+	 * subprocedure was performed
+	 */
+	zexpect_call_count("bt_cap_initiator_cb.unicast_start_codec_configured", 1,
+			   mock_cap_initiator_unicast_start_codec_configured_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_start_qos_configured", 1,
+			   mock_cap_initiator_unicast_start_qos_configured_cb_fake.call_count);
+
 	zexpect_call_count("bt_cap_initiator_cb.unicast_start_complete_cb", 1,
 			   mock_cap_initiator_unicast_start_complete_cb_fake.call_count);
+
 	zassert_equal(0, mock_cap_initiator_unicast_start_complete_cb_fake.arg0_history[0], "%d",
 		      mock_cap_initiator_unicast_start_complete_cb_fake.arg0_history[0]);
 	zassert_equal_ptr(NULL, mock_cap_initiator_unicast_start_complete_cb_fake.arg1_history[0],
@@ -445,9 +529,7 @@ static ZTEST_F(cap_initiator_test_unicast_start,
 
 static ZTEST_F(cap_initiator_test_unicast_start, test_initiator_unicast_start_state_qos_configured)
 {
-	/* Use a different preset than fixture->preset to also verify that the codec_cfg data is
-	 * updated
-	 */
+	/* Use a different preset than fixture->preset to also verify that the QoS is updated */
 	struct bt_bap_lc3_preset preset =
 		(struct bt_bap_lc3_preset)BT_BAP_LC3_UNICAST_PRESET_48_2_1(
 			BT_AUDIO_LOCATION_MONO_AUDIO, BT_AUDIO_CONTEXT_TYPE_UNSPECIFIED);
@@ -476,16 +558,27 @@ static ZTEST_F(cap_initiator_test_unicast_start, test_initiator_unicast_start_st
 	/* Ensure that the stream and group QoS are different at this point*/
 	ARRAY_FOR_EACH(fixture->cap_streams, i) {
 		const struct bt_bap_stream *bap_stream = &fixture->cap_streams[i].bap_stream;
+		struct bt_bap_qos_cfg qos;
 
-		/* Verify that the QoS config was updated */
-		zassert_false(bt_bap_qos_cfg_eq(&preset.qos, bap_stream->qos));
+		err = bt_bap_unicast_client_qos_from_group(bap_stream, &qos);
+
+		zassert_false(bt_bap_qos_cfg_eq(&qos, bap_stream->qos));
 	}
 
 	err = bt_cap_initiator_unicast_audio_start(&fixture->audio_start_param);
 	zassert_equal(err, 0, "Unexpected return value %d", err);
 
+	/* The streams were already codec configured, so that subprocedure was skipped, but the
+	 * QoS configuration was different so that subprocedure was performed
+	 */
+	zexpect_call_count("bt_cap_initiator_cb.unicast_start_codec_configured", 0,
+			   mock_cap_initiator_unicast_start_codec_configured_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_start_qos_configured", 1,
+			   mock_cap_initiator_unicast_start_qos_configured_cb_fake.call_count);
+
 	zexpect_call_count("bt_cap_initiator_cb.unicast_start_complete_cb", 1,
 			   mock_cap_initiator_unicast_start_complete_cb_fake.call_count);
+
 	zassert_equal(0, mock_cap_initiator_unicast_start_complete_cb_fake.arg0_history[0], "%d",
 		      mock_cap_initiator_unicast_start_complete_cb_fake.arg0_history[0]);
 	zassert_equal_ptr(NULL, mock_cap_initiator_unicast_start_complete_cb_fake.arg1_history[0],
@@ -499,7 +592,7 @@ static ZTEST_F(cap_initiator_test_unicast_start, test_initiator_unicast_start_st
 			      "[%zu]: Stream %p unexpected state: %d", i, bap_stream, state);
 
 		/* Verify that the QoS config was updated */
-		zassert_true(bt_bap_qos_cfg_eq(&fixture->preset.qos, bap_stream->qos));
+		zassert_true(bt_bap_qos_cfg_eq(&preset.qos, bap_stream->qos));
 	}
 }
 
@@ -525,6 +618,16 @@ static ZTEST_F(cap_initiator_test_unicast_start, test_initiator_unicast_start_st
 
 	err = bt_cap_initiator_unicast_audio_start(&fixture->audio_start_param);
 	zassert_equal(err, 0, "Unexpected return value %d", err);
+
+	/* The streams were already enabled with the requested configuration and metadata, so the
+	 * Codec Configuration, QoS Configuration and Enable subprocedures were all skipped
+	 */
+	zexpect_call_count("bt_cap_initiator_cb.unicast_start_codec_configured", 0,
+			   mock_cap_initiator_unicast_start_codec_configured_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_start_qos_configured", 0,
+			   mock_cap_initiator_unicast_start_qos_configured_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_start_enabled", 0,
+			   mock_cap_initiator_unicast_start_enabled_cb_fake.call_count);
 
 	zexpect_call_count("bt_cap_initiator_cb.unicast_start_complete_cb", 1,
 			   mock_cap_initiator_unicast_start_complete_cb_fake.call_count);

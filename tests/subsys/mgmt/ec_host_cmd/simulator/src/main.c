@@ -4,9 +4,65 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <string.h>
+#include <zephyr/logging/log_backend.h>
 #include <zephyr/mgmt/ec_host_cmd/ec_host_cmd.h>
 #include <zephyr/mgmt/ec_host_cmd/simulator.h>
+#include <zephyr/sys/cbprintf.h>
 #include <zephyr/ztest.h>
+
+static size_t hexdump_log_count;
+static size_t first_hexdump_len;
+static size_t last_hexdump_len;
+static char last_log_str[128];
+static size_t last_log_str_pos;
+
+static int test_log_str_out(int c, void *ctx)
+{
+	ARG_UNUSED(ctx);
+	if (last_log_str_pos < sizeof(last_log_str) - 1) {
+		last_log_str[last_log_str_pos++] = (char)c;
+		last_log_str[last_log_str_pos] = '\0';
+	}
+	return c;
+}
+
+static void test_log_backend_process(const struct log_backend *const backend,
+				     union log_msg_generic *msg)
+{
+	size_t data_len = 0;
+	size_t pkg_len = 0;
+	uint8_t *pkg;
+
+	ARG_UNUSED(backend);
+	log_msg_get_data(&msg->log, &data_len);
+	if (data_len > 0) {
+		if (hexdump_log_count == 0) {
+			first_hexdump_len = data_len;
+		}
+		hexdump_log_count++;
+		last_hexdump_len = data_len;
+	}
+
+	pkg = log_msg_get_package(&msg->log, &pkg_len);
+	if (pkg != NULL && pkg_len > 0) {
+		last_log_str_pos = 0;
+		last_log_str[0] = '\0';
+		cbpprintf(test_log_str_out, NULL, pkg);
+	}
+}
+
+static void test_log_backend_panic(const struct log_backend *const backend)
+{
+	ARG_UNUSED(backend);
+}
+
+static const struct log_backend_api test_log_backend_api = {
+	.process = test_log_backend_process,
+	.panic = test_log_backend_panic,
+};
+
+LOG_BACKEND_DEFINE(test_log_backend, test_log_backend_api, true);
 
 /* Variables used to record what is "sent" to host for verification. */
 K_SEM_DEFINE(send_called, 0, 1);
@@ -140,6 +196,16 @@ static void verify_tx_error(enum ec_host_cmd_status error)
 }
 
 #define EC_CMD_HELLO 0x0001
+static uint32_t hello_v0_resp(uint32_t in_data)
+{
+	return in_data + 0x01020304;
+}
+
+static uint32_t hello_v1_resp(uint32_t in_data)
+{
+	return in_data + 0x02040608;
+}
+
 static enum ec_host_cmd_status
 ec_host_cmd_add(struct ec_host_cmd_handler_args *args)
 {
@@ -147,9 +213,9 @@ ec_host_cmd_add(struct ec_host_cmd_handler_args *args)
 	struct ec_response_add *const response = args->output_buf;
 
 	if (args->version == 0) {
-		response->out_data = request->in_data + 0x01020304;
+		response->out_data = hello_v0_resp(request->in_data);
 	} else if (args->version == 1) {
-		response->out_data = request->in_data + 0x02040608;
+		response->out_data = hello_v1_resp(request->in_data);
 	} else if (args->version == 2) {
 		return EC_HOST_CMD_OVERFLOW;
 	} else {
@@ -178,7 +244,8 @@ ZTEST(ec_host_cmd, test_add)
 	expected_dut_to_host->header.reserved = 0;
 	expected_dut_to_host->header.data_len =
 		sizeof(expected_dut_to_host->add);
-	expected_dut_to_host->add.out_data = 0x11223344;
+	expected_dut_to_host->add.out_data =
+		hello_v0_resp(host_to_dut->add.in_data);
 
 	verify_tx_data();
 }
@@ -199,7 +266,8 @@ ZTEST(ec_host_cmd, test_add_version_2)
 	expected_dut_to_host->header.reserved = 0;
 	expected_dut_to_host->header.data_len =
 		sizeof(expected_dut_to_host->add);
-	expected_dut_to_host->add.out_data = 0x12243648;
+	expected_dut_to_host->add.out_data =
+		hello_v1_resp(host_to_dut->add.in_data);
 
 	verify_tx_data();
 }
@@ -332,6 +400,139 @@ ZTEST(ec_host_cmd, test_add_rx_size_too_small)
 	verify_tx_error(EC_HOST_CMD_REQUEST_TRUNCATED);
 }
 
+ZTEST(ec_host_cmd, test_add_rqt_size_too_small)
+{
+	*host_to_dut = (struct rx_structure){
+		.header = {
+				.prtcl_ver = 3,
+				.cmd_id = EC_CMD_HELLO,
+				.data_len = sizeof(host_to_dut->add) - 1,
+			},
+		.add.in_data = 0x10203040,
+	};
+
+	simulate_rx_data();
+
+	verify_tx_error(EC_HOST_CMD_REQUEST_TRUNCATED);
+}
+
+ZTEST(ec_host_cmd, test_no_log_on_header_truncated)
+{
+	int rv;
+
+	hexdump_log_count = 0;
+	last_hexdump_len = 0;
+
+	host_to_dut->header = (struct ec_host_cmd_request_header){
+		.prtcl_ver = 3,
+		.cmd_id = EC_CMD_HELLO,
+		.data_len = 64,
+	};
+
+	rv = ec_host_cmd_backend_sim_data_received(host_to_dut_buffer,
+						   sizeof(host_to_dut->header) - 1);
+	zassert_equal(rv, 0, "Could not send data %d", rv);
+	rv = k_sem_take(&send_called, K_SECONDS(1));
+	zassert_equal(rv, 0, "Send was not called");
+	verify_tx_error(EC_HOST_CMD_REQUEST_TRUNCATED);
+	zassert_equal(hexdump_log_count, 0,
+		      "Header-truncated request must not trigger hexdump log");
+}
+
+ZTEST(ec_host_cmd, test_no_log_on_invalid_prtcl_ver)
+{
+	hexdump_log_count = 0;
+	last_hexdump_len = 0;
+
+	*host_to_dut = (struct rx_structure){
+		.header = {
+			.prtcl_ver = 2,
+			.cmd_id = EC_CMD_HELLO,
+			.data_len = sizeof(host_to_dut->add),
+		},
+		.add.in_data = 0x10203040,
+	};
+
+	simulate_rx_data();
+	verify_tx_error(EC_HOST_CMD_INVALID_HEADER);
+	zassert_equal(hexdump_log_count, 0,
+		      "Invalid header version request must not trigger hexdump log");
+}
+
+ZTEST(ec_host_cmd, test_no_log_on_payload_truncated)
+{
+	int rv;
+
+	hexdump_log_count = 0;
+	last_hexdump_len = 0;
+
+	host_to_dut->header = (struct ec_host_cmd_request_header){
+		.prtcl_ver = 3,
+		.cmd_id = EC_CMD_HELLO,
+		.data_len = 128,
+	};
+
+	rv = ec_host_cmd_backend_sim_data_received(host_to_dut_buffer,
+						   sizeof(host_to_dut->header));
+	zassert_equal(rv, 0, "Could not send data %d", rv);
+	rv = k_sem_take(&send_called, K_SECONDS(1));
+	zassert_equal(rv, 0, "Send was not called");
+	verify_tx_error(EC_HOST_CMD_REQUEST_TRUNCATED);
+	zassert_equal(hexdump_log_count, 0,
+		      "Oversized/truncated request must not trigger hexdump log");
+}
+
+ZTEST(ec_host_cmd, test_no_log_on_invalid_checksum)
+{
+	int rv;
+
+	hexdump_log_count = 0;
+	last_hexdump_len = 0;
+
+	*host_to_dut = (struct rx_structure){
+		.header = {
+			.prtcl_ver = 3,
+			.cmd_id = EC_CMD_HELLO,
+			.checksum = 42,
+			.data_len = sizeof(host_to_dut->add),
+		},
+		.add.in_data = 0x10203040,
+	};
+
+	rv = ec_host_cmd_backend_sim_data_received(host_to_dut_buffer,
+						   sizeof(host_to_dut_buffer));
+	zassert_equal(rv, 0, "Could not send data %d", rv);
+	rv = k_sem_take(&send_called, K_SECONDS(1));
+	zassert_equal(rv, 0, "Send was not called");
+	verify_tx_error(EC_HOST_CMD_INVALID_CHECKSUM);
+	zassert_equal(hexdump_log_count, 0,
+		      "Invalid checksum request must not trigger hexdump log");
+}
+
+ZTEST(ec_host_cmd, test_log_on_valid_request)
+{
+	hexdump_log_count = 0;
+	first_hexdump_len = 0;
+	last_hexdump_len = 0;
+
+	*host_to_dut = (struct rx_structure){
+		.header = {
+			.prtcl_ver = 3,
+			.cmd_id = EC_CMD_HELLO,
+			.data_len = sizeof(host_to_dut->add),
+		},
+		.add.in_data = 0x10203040,
+	};
+
+	simulate_rx_data();
+	zassert_equal(hexdump_log_count, 2,
+		      "Valid request should log request and response hexdumps");
+	zassert_equal(first_hexdump_len, sizeof(host_to_dut->add),
+		      "Unexpected request hexdump length %zu", first_hexdump_len);
+	zassert_equal(last_hexdump_len, sizeof(expected_dut_to_host->add),
+		      "Unexpected response hexdump length %zu", last_hexdump_len);
+}
+
 ZTEST(ec_host_cmd, test_unknown_command)
 {
 	host_to_dut->header.prtcl_ver = 3;
@@ -369,6 +570,10 @@ ec_host_cmd_unbounded(struct ec_host_cmd_handler_args *args)
 	}
 
 	/* Version 0 (and 2) write request bytes if it can fit */
+	if (request->bytes_to_write == 0) {
+		return EC_HOST_CMD_SUCCESS;
+	}
+
 	if (request->bytes_to_write > args->output_buf_max) {
 		return EC_HOST_CMD_OVERFLOW;
 	}
@@ -383,6 +588,54 @@ ec_host_cmd_unbounded(struct ec_host_cmd_handler_args *args)
 }
 EC_HOST_CMD_HANDLER_UNBOUND(EC_CMD_UNBOUNDED, ec_host_cmd_unbounded,
 			    BIT(0) | BIT(1) | BIT(2));
+
+ZTEST(ec_host_cmd, test_unbounded_output_cleared)
+{
+	const struct tx_structure *const tx = (void *)sent->buf;
+
+	/*
+	 * First call writes hello_v0_resp(in_data) to tx->add.out_data and sets
+	 * output_buf_size = 4.
+	 */
+	*host_to_dut = (struct rx_structure){
+		.header = {
+				.prtcl_ver = 3,
+				.cmd_id = EC_CMD_HELLO,
+				.data_len = sizeof(host_to_dut->add),
+			},
+		.add.in_data = 0x10203040,
+	};
+	*expected_dut_to_host = (struct tx_structure){
+		.header = {
+				.prtcl_ver = 3,
+				.data_len = sizeof(expected_dut_to_host->add),
+			},
+		.add.out_data = hello_v0_resp(host_to_dut->add.in_data),
+	};
+	simulate_rx_data();
+	verify_tx_data();
+	zassert_equal(tx->add.out_data,
+		      hello_v0_resp(host_to_dut->add.in_data));
+
+	/*
+	 * With bytes_to_write == 0, the handler returns without modifying
+	 * output_buf or output_buf_size, verifying that both were reset to 0
+	 * before the handler was called.
+	 */
+	*host_to_dut = (struct rx_structure){
+		.header = {
+				.prtcl_ver = 3,
+				.cmd_id = EC_CMD_UNBOUNDED,
+				.data_len = sizeof(host_to_dut->unbounded),
+			},
+		.unbounded.bytes_to_write = 0,
+	};
+	simulate_rx_data();
+
+	expected_dut_to_host->header.data_len = 0;
+	verify_tx_data();
+	zassert_equal(tx->add.out_data, 0);
+}
 
 ZTEST(ec_host_cmd, test_unbounded_handler_error_return)
 {
@@ -412,6 +665,24 @@ ZTEST(ec_host_cmd, test_unbounded_handler_response_too_big)
 	verify_tx_error(EC_HOST_CMD_INVALID_RESPONSE);
 }
 
+
+ZTEST(ec_host_cmd, test_unbounded_handler_response_wrap)
+{
+	*host_to_dut = (struct rx_structure){
+		.header = {
+			.prtcl_ver = 3,
+			.cmd_id = EC_CMD_UNBOUNDED,
+			.cmd_ver = 1,
+			.data_len = sizeof(host_to_dut->unbounded),
+		},
+		/* 0xFFF8 + 8 wraps to 0 in uint16_t */
+		.unbounded.bytes_to_write =
+			UINT16_MAX - sizeof(struct ec_host_cmd_response_header) + 1,
+	};
+	simulate_rx_data();
+	verify_tx_error(EC_HOST_CMD_INVALID_RESPONSE);
+}
+
 #define EC_CMD_TOO_BIG 0x0003
 static enum ec_host_cmd_status
 ec_host_cmd_too_big(struct ec_host_cmd_handler_args *args)
@@ -432,6 +703,141 @@ ZTEST(ec_host_cmd, test_response_always_too_big)
 	simulate_rx_data();
 
 	verify_tx_error(EC_HOST_CMD_INVALID_RESPONSE);
+}
+
+ZTEST(ec_host_cmd, test_rx_data_len_bounds)
+{
+	const uint16_t invalid_data_lens[] = {
+		CONFIG_EC_HOST_CMD_HANDLER_RX_BUFFER_SIZE -
+			sizeof(struct ec_host_cmd_request_header) + 1,
+		UINT16_MAX - sizeof(struct ec_host_cmd_request_header) + 1,
+		UINT16_MAX,
+	};
+
+	ARRAY_FOR_EACH(invalid_data_lens, i) {
+		int rv;
+
+		hexdump_log_count = 0;
+		host_to_dut->header = (struct ec_host_cmd_request_header){
+			.prtcl_ver = 3,
+			.cmd_id = EC_CMD_HELLO,
+			.data_len = invalid_data_lens[i],
+		};
+
+		rv = ec_host_cmd_backend_sim_data_received(
+			host_to_dut_buffer, sizeof(host_to_dut_buffer));
+		zassert_equal(rv, 0, "Could not send data %d", rv);
+		rv = k_sem_take(&send_called, K_SECONDS(1));
+		zassert_equal(rv, 0, "Send was not called");
+		verify_tx_error(EC_HOST_CMD_REQUEST_TRUNCATED);
+		zassert_equal(hexdump_log_count, 0,
+			      "Rejected request must not trigger hexdump log");
+	}
+}
+
+ZTEST(ec_host_cmd, test_err_log_on_unverified_rx)
+{
+	int rv;
+
+	/* Prime rx_ctx.buf with a valid command (cmd_id = EC_CMD_HELLO = 0x0001) */
+	*host_to_dut = (struct rx_structure){
+		.header = {
+			.prtcl_ver = 3,
+			.cmd_id = EC_CMD_HELLO,
+			.data_len = sizeof(host_to_dut->add),
+		},
+		.add = {
+			.in_data = 0x10203040,
+		},
+	};
+	simulate_rx_data();
+
+	/*
+	 * Send a 2-byte truncated packet so bytes 2..3 (cmd_id) in rx_ctx.buf
+	 * retain the stale 0x0001 value from the previous command.
+	 */
+	last_log_str[0] = '\0';
+	rv = ec_host_cmd_backend_sim_data_received(host_to_dut_buffer, 2);
+	zassert_equal(rv, 0, "Could not send data %d", rv);
+	rv = k_sem_take(&send_called, K_SECONDS(1));
+	zassert_equal(rv, 0, "Send was not called");
+	verify_tx_error(EC_HOST_CMD_REQUEST_TRUNCATED);
+	zassert_equal(strcmp(last_log_str, "HC rx err 13"), 0,
+		      "Expected 'HC rx err 13' without stale cmd_id, got '%s'", last_log_str);
+
+	/*
+	 * Verify that when verify_rx() succeeds and handler validation fails,
+	 * cmd_id is logged as expected.
+	 */
+	last_log_str[0] = '\0';
+	*host_to_dut = (struct rx_structure){
+		.header = {
+			.prtcl_ver = 3,
+			.cmd_id = EC_CMD_HELLO,
+			.cmd_ver = 3,
+			.data_len = sizeof(host_to_dut->add),
+		},
+		.add = {
+			.in_data = 0x10203040,
+		},
+	};
+	simulate_rx_data();
+	verify_tx_error(EC_HOST_CMD_INVALID_VERSION);
+	zassert_equal(strcmp(last_log_str, "HC 0x0001 err 6"), 0,
+		      "Expected 'HC 0x0001 err 6', got '%s'", last_log_str);
+}
+
+ZTEST(ec_host_cmd, test_no_log_on_invalid_response)
+{
+	const uint16_t oversized_len = UINT16_MAX - sizeof(struct ec_host_cmd_response_header) + 1;
+
+	hexdump_log_count = 0;
+	first_hexdump_len = 0;
+	last_hexdump_len = 0;
+
+	*host_to_dut = (struct rx_structure){
+		.header = {
+			.prtcl_ver = 3,
+			.cmd_id = EC_CMD_UNBOUNDED,
+			.cmd_ver = 1,
+			.data_len = sizeof(host_to_dut->unbounded),
+		},
+		.unbounded.bytes_to_write = oversized_len,
+	};
+
+	simulate_rx_data();
+	verify_tx_error(EC_HOST_CMD_INVALID_RESPONSE);
+	zassert_equal(hexdump_log_count, 1,
+		      "Rejected response must not trigger response hexdump (got %zu hexdumps)",
+		      hexdump_log_count);
+	zassert_equal(last_hexdump_len, sizeof(host_to_dut->unbounded),
+		      "Only the request payload should be hexdumped");
+}
+
+ZTEST(ec_host_cmd, test_log_on_request_max_version)
+{
+	hexdump_log_count = 0;
+	first_hexdump_len = 0;
+
+	*host_to_dut = (struct rx_structure){
+		.header = {
+			.prtcl_ver = 3,
+			.cmd_id = EC_CMD_HELLO,
+			.cmd_ver = UINT8_MAX,
+			.data_len = sizeof(host_to_dut->add),
+		},
+		.add.in_data = 0x10203040,
+	};
+
+	simulate_rx_data();
+
+	/* It should log the request hexdump, then fail validation. */
+	zassert_equal(hexdump_log_count, 1,
+		      "Request with max version should log the request hexdump");
+	zassert_equal(first_hexdump_len, sizeof(host_to_dut->add),
+		      "Unexpected request hexdump length");
+
+	verify_tx_error(EC_HOST_CMD_INVALID_VERSION);
 }
 
 static void *ec_host_cmd_tests_setup(void)

@@ -33,9 +33,6 @@ LOG_MODULE_REGISTER(net_ethernet_vlan, CONFIG_NET_L2_ETHERNET_LOG_LEVEL);
  */
 #if CONFIG_NET_VLAN_COUNT > 0
 
-#define MAX_VIRT_NAME_LEN MIN(sizeof("<not attached>"), \
-			      CONFIG_NET_L2_VIRTUAL_MAX_NAME_LEN)
-
 static void vlan_iface_init(struct net_if *iface);
 static int vlan_interface_attach(struct net_if *vlan_iface,
 				 struct net_if *iface);
@@ -56,7 +53,7 @@ struct vlan_context {
 	bool is_used;   /* Is there active config on this context */
 };
 
-static const struct virtual_interface_api vlan_iface_api = {
+static DEVICE_API(virtual_interface, vlan_iface_api) = {
 	.iface_api.init = vlan_iface_init,
 
 	.get_capabilities = vlan_get_capabilities,
@@ -215,7 +212,10 @@ static bool enable_vlan_iface(struct vlan_context *ctx,
 			      struct net_if *iface)
 {
 	int iface_idx = net_if_get_by_iface(iface);
-	char name[MAX_VIRT_NAME_LEN];
+	/* Sized for the widest %d; net_virtual_set_name() truncates to
+	 * CONFIG_NET_L2_VIRTUAL_MAX_NAME_LEN.
+	 */
+	char name[sizeof("VLAN to -2147483648")];
 	int ret;
 
 	if (iface_idx < 0) {
@@ -357,7 +357,7 @@ int net_eth_vlan_enable(struct net_if *iface, uint16_t tag)
 {
 	struct ethernet_context *ctx = net_if_l2_data(iface);
 	const struct device *dev = net_if_get_device(iface);
-	const struct ethernet_api *eth;
+	const struct ethernet_driver_api *eth;
 	struct vlan_context *vlan;
 	int ret;
 
@@ -365,10 +365,6 @@ int net_eth_vlan_enable(struct net_if *iface, uint16_t tag)
 	NET_ASSERT(dev != NULL);
 
 	eth = dev->api;
-
-	if (!eth) {
-		return -ENOENT;
-	}
 
 	if (net_if_l2(iface) != &NET_L2_GET_NAME(ETHERNET)) {
 		return -EINVAL;
@@ -443,7 +439,7 @@ int net_eth_vlan_enable(struct net_if *iface, uint16_t tag)
 
 int net_eth_vlan_disable(struct net_if *iface, uint16_t tag)
 {
-	const struct ethernet_api *eth;
+	const struct ethernet_driver_api *eth;
 	const struct device *dev;
 	struct vlan_context *vlan;
 

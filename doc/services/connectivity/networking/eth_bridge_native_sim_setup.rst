@@ -11,7 +11,8 @@ This document describes how to set up a bridged Ethernet network between a (Linu
 and a Zephyr application running in a :zephyr:board:`native_sim <native_sim>` board.
 
 This setup is useful when testing the Ethernet bridging feature that can be enabled with
-:kconfig:option:`CONFIG_NET_ETHERNET_BRIDGE` Kconfig option. In this setup, the net-tools
+:kconfig:option:`CONFIG_NET_ETHERNET_BRIDGE` Kconfig option, see
+:ref:`ethernet_bridge_interface`. In this setup, the net-tools
 configuration creates two host network interfaces ``zeth0`` and ``zeth1`` and connects them
 to Zephyr's :zephyr:board:`native_sim <native_sim>` application.
 
@@ -54,6 +55,22 @@ Example output of the host interfaces:
 Then create a sample and enable Ethernet bridging support. In this example we create
 :zephyr:code-sample:`sockets-echo-server` sample application.
 
+Bridging needs a second TAP interface. Create a devicetree overlay file
+:file:`second-iface.overlay` that adds a second ``zephyr,native-tap`` interface:
+
+.. code-block:: devicetree
+
+   / {
+       zeth1: zeth1 {
+           compatible = "zephyr,native-tap";
+           status = "okay";
+           zephyr,random-mac-address;
+           host-interface = "zeth1";
+       };
+   };
+
+Then build and run the application, pointing at the overlay:
+
 .. code-block:: console
 
    west build -p -b native_sim -d ../build/echo-server \
@@ -61,7 +78,7 @@ Then create a sample and enable Ethernet bridging support. In this example we cr
       -DCONFIG_UART_NATIVE_PTY_AUTOATTACH_DEFAULT_CMD="\"gnome-terminal -- screen %s\"" \
       -DCONFIG_NET_ETHERNET_BRIDGE=y \
       -DCONFIG_NET_ETHERNET_BRIDGE_SHELL=y \
-      -DCONFIG_ETH_NATIVE_TAP_INTERFACE_COUNT=2 \
+      -DEXTRA_DTC_OVERLAY_FILE=second-iface.overlay \
       -DCONFIG_NET_IF_MAX_IPV6_COUNT=2 \
       -DCONFIG_NET_IF_MAX_IPV4_COUNT=2
    ../build/echo-server/zephyr/zephyr.exe -attach_uart

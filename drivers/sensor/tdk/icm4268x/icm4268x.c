@@ -127,7 +127,7 @@ static int icm4268x_sample_fetch(const struct device *dev, enum sensor_channel c
 	}
 
 	for (int i = 0; i < 7; i++) {
-		data->readings[i] = sys_le16_to_cpu((readings[i * 2] << 8) | readings[i * 2 + 1]);
+		data->readings[i] = (int16_t)sys_get_be16(&readings[i * 2]);
 	}
 
 	return 0;
@@ -335,7 +335,7 @@ void icm4268x_unlock(const struct device *dev)
 
 /* device defaults to spi mode 0/3 support */
 #define ICM4268X_SPI_CFG                                                                           \
-	SPI_OP_MODE_MASTER | SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_WORD_SET(8) | SPI_TRANSFER_MSB
+	SPI_OP_MODE_CONTROLLER | SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_WORD_SET(8) | SPI_TRANSFER_MSB
 
 #define ICM4268X_RTIO_DEFINE(inst)                                                                 \
 	SPI_DT_IODEV_DEFINE(icm4268x_spi_iodev_##inst, DT_DRV_INST(inst), ICM4268X_SPI_CFG);       \
@@ -346,7 +346,9 @@ void icm4268x_unlock(const struct device *dev)
 		COND_CODE_1(DT_INST_NODE_HAS_COMPAT(inst, invensense_icm42688),	\
 			(.variant = ICM4268X_VARIANT_ICM42688,), (		\
 		COND_CODE_1(DT_INST_NODE_HAS_COMPAT(inst, invensense_icm42686),	\
-			(.variant = ICM4268X_VARIANT_ICM42686,), ())))		\
+			(.variant = ICM4268X_VARIANT_ICM42686,), (		\
+		COND_CODE_1(DT_INST_NODE_HAS_COMPAT(inst, invensense_iim42653),	\
+			(.variant = ICM4268X_VARIANT_IIM42653,), ())))))	\
 		.accel_pwr_mode = DT_INST_PROP(inst, accel_pwr_mode),		\
 		.accel_fs = DT_INST_PROP(inst, accel_fs),			\
 		.accel_odr = DT_INST_PROP(inst, accel_odr),			\
@@ -392,16 +394,23 @@ void icm4268x_unlock(const struct device *dev)
 		     (DT_INST_PROP(inst, accel_fs) <=  ICM42688_DT_ACCEL_FS_2),			   \
 		"Invalid accel-fs configured for ICM42688. Please revisit DTS config-set");
 
+#define IIM42653_BUILD_CONFIG_VALIDATION(inst)							   \
+	BUILD_ASSERT(DT_INST_PROP(inst, accel_fs) <= IIM42653_DT_ACCEL_FS_4,			   \
+		"Invalid accel-fs configured for IIM42653. Please revisit DTS config-set");
+
 #define ICM4268X_INIT(inst)                                                                        \
 												   \
 	BUILD_ASSERT(DT_INST_NODE_HAS_COMPAT(inst, invensense_icm42688) ||			   \
-		     DT_INST_NODE_HAS_COMPAT(inst, invensense_icm42686),			   \
+		     DT_INST_NODE_HAS_COMPAT(inst, invensense_icm42686) ||			   \
+		     DT_INST_NODE_HAS_COMPAT(inst, invensense_iim42653),			   \
 		"Please define additional compatible property to dts node: "			   \
-		"<invensense,icm42688> or <invensense,icm42686>");				   \
+		"<invensense,icm42688>, <invensense,icm42686> or <invensense,iim42653>");	   \
 												   \
 												   \
 	COND_CODE_1(DT_INST_NODE_HAS_COMPAT(inst, invensense_icm42688),				   \
 		    (ICM42688_BUILD_CONFIG_VALIDATION(inst)), ());				   \
+	COND_CODE_1(DT_INST_NODE_HAS_COMPAT(inst, invensense_iim42653),				   \
+		    (IIM42653_BUILD_CONFIG_VALIDATION(inst)), ());				   \
 												   \
 	ICM4268X_DEFINE_DATA(inst);                                                                \
                                                                                                    \

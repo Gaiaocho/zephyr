@@ -482,6 +482,87 @@ ZTEST_USER(net_socket_udp, test_v4_sendmsg_recvfrom)
 	zassert_equal(rv, 0, "close failed");
 }
 
+/* A control message header with a length that cannot be valid ends the walk
+ * over the control buffer: one that is shorter than a header, and one that
+ * is longer than the rest of the buffer, where the largest value makes the
+ * aligned length wrap around to zero on 32-bit targets. A length of zero is
+ * what the stack finds when the buffer is larger than the control messages
+ * placed in it and the rest is zeroed.
+ */
+ZTEST_USER(net_socket_udp, test_v4_sendmsg_invalid_control_length)
+{
+	static const net_socklen_t lengths[] = {
+		0,
+		sizeof(struct net_cmsghdr) - 1,
+		NET_CMSG_SPACE(sizeof(int)) + 1,
+		UINT32_MAX,
+	};
+	int rv;
+	int client_sock;
+	int server_sock;
+	struct net_sockaddr_in client_addr;
+	struct net_sockaddr_in server_addr;
+	struct net_msghdr msg;
+	struct net_cmsghdr *cmsg;
+	struct net_iovec io_vector[1];
+	union {
+		struct net_cmsghdr hdr;
+		unsigned char  buf[2 * NET_CMSG_SPACE(sizeof(int))];
+	} cmsgbuf;
+
+	prepare_sock_udp_v4(MY_IPV4_ADDR, ANY_PORT, &client_sock, &client_addr);
+	prepare_sock_udp_v4(MY_IPV4_ADDR, SERVER_PORT, &server_sock, &server_addr);
+
+	rv = zsock_bind(server_sock,
+			(struct net_sockaddr *)&server_addr,
+			sizeof(server_addr));
+	zassert_equal(rv, 0, "server bind failed");
+
+	rv = zsock_bind(client_sock,
+			(struct net_sockaddr *)&client_addr,
+			sizeof(client_addr));
+	zassert_equal(rv, 0, "client bind failed");
+
+	io_vector[0].iov_base = TEST_STR_SMALL;
+	io_vector[0].iov_len = strlen(TEST_STR_SMALL);
+
+	ARRAY_FOR_EACH(lengths, i) {
+		memset(&cmsgbuf, 0, sizeof(cmsgbuf));
+		memset(&msg, 0, sizeof(msg));
+		msg.msg_control = &cmsgbuf.buf;
+		msg.msg_controllen = sizeof(cmsgbuf.buf);
+		msg.msg_iov = io_vector;
+		msg.msg_iovlen = 1;
+		msg.msg_name = &server_addr;
+		msg.msg_namelen = sizeof(server_addr);
+
+		cmsg = NET_CMSG_FIRSTHDR(&msg);
+		cmsg->cmsg_len = NET_CMSG_LEN(sizeof(int));
+		cmsg->cmsg_level = ZSOCK_SOL_SOCKET;
+		cmsg->cmsg_type = 1122;
+		*(int *)NET_CMSG_DATA(cmsg) = 42;
+
+		cmsg = NET_CMSG_NXTHDR(&msg, cmsg);
+		zassert_not_null(cmsg, "no room for a second header");
+		cmsg->cmsg_len = lengths[i];
+		zassert_is_null(NET_CMSG_NXTHDR(&msg, cmsg),
+				"walk does not stop at a header of length %u", lengths[i]);
+
+		comm_sendmsg_recvfrom(client_sock,
+				      (struct net_sockaddr *)&client_addr,
+				      sizeof(client_addr),
+				      &msg,
+				      server_sock,
+				      (struct net_sockaddr *)&server_addr,
+				      sizeof(server_addr));
+	}
+
+	rv = zsock_close(client_sock);
+	zassert_equal(rv, 0, "close failed");
+	rv = zsock_close(server_sock);
+	zassert_equal(rv, 0, "close failed");
+}
+
 ZTEST_USER(net_socket_udp, test_v4_sendmsg_recvfrom_no_aux_data)
 {
 	int rv;
@@ -1689,7 +1770,7 @@ static int eth_fake_send(const struct device *dev, struct net_pkt *pkt)
 	return 0;
 }
 
-static struct ethernet_api eth_fake_api_funcs = {
+static DEVICE_API(ethernet, eth_fake_api_funcs) = {
 	.iface_api.init = eth_fake_iface_init,
 	.send = eth_fake_send,
 };
@@ -4508,6 +4589,59 @@ ZTEST(net_socket_udp, test_ipv4_mapped_to_ipv6_sendmsg)
 	Z_TEST_SKIP_IFNDEF(CONFIG_NET_IPV4_MAPPING_TO_IPV6);
 
 	test_ipv4_mapped_to_ipv6_send_common(IPV4_MAPPED_TO_IPV6_SENDMSG);
+}
+
+/* A dual-stack socket bound to an IPv6 address other than the unspecified one
+ * has no IPv4 address to send from, so a send to an IPv4-mapped address fails.
+ */
+ZTEST(net_socket_udp, test_ipv4_mapped_to_ipv6_send_from_bound_v6)
+{
+	int off = 0;
+	int ret;
+	int err;
+	int sock_s, sock_c;
+	net_socklen_t addrlen;
+	struct net_sockaddr_in addr_s4 = { 0 };
+	struct net_sockaddr_in addr_recv = { 0 };
+	struct net_sockaddr_in6 addr_c6 = { 0 };
+	struct net_sockaddr_in6 addr_dst = { 0 };
+
+	Z_TEST_SKIP_IFNDEF(CONFIG_NET_IPV4_MAPPING_TO_IPV6);
+
+	prepare_sock_udp_v4(MY_IPV4_ADDR, SERVER_PORT, &sock_s, &addr_s4);
+	ret = zsock_bind(sock_s, (struct net_sockaddr *)&addr_s4, sizeof(addr_s4));
+	zassert_ok(ret, "bind failed, %d", errno);
+
+	prepare_sock_udp_v6(MY_IPV6_ADDR_ETH, CLIENT_PORT, &sock_c, &addr_c6);
+	ret = zsock_setsockopt(sock_c, NET_IPPROTO_IPV6, ZSOCK_IPV6_V6ONLY, &off, sizeof(off));
+	zassert_ok(ret, "setsockopt failed, %d", errno);
+	ret = zsock_bind(sock_c, (struct net_sockaddr *)&addr_c6, sizeof(addr_c6));
+	zassert_ok(ret, "bind failed, %d", errno);
+
+	addr_dst.sin6_family = NET_AF_INET6;
+	addr_dst.sin6_port = net_htons(SERVER_PORT);
+	ret = zsock_inet_pton(NET_AF_INET6, MY_IPV4_MAPPED_ADDR, &addr_dst.sin6_addr);
+	zassert_equal(ret, 1, "inet_pton failed");
+
+	ret = zsock_sendto(sock_c, TEST_STR_SMALL, sizeof(TEST_STR_SMALL) - 1, 0,
+			   (struct net_sockaddr *)&addr_dst, sizeof(addr_dst));
+	err = errno;
+	zexpect_equal(ret, -1, "sendto should fail (was %d)", ret);
+	zexpect_equal(err, EINVAL, "unexpected errno (%d)", err);
+
+	/* Give a datagram sent by mistake a chance to go through the net stack */
+	k_msleep(10);
+
+	addrlen = sizeof(addr_recv);
+	ret = zsock_recvfrom(sock_s, rx_buf, sizeof(rx_buf), ZSOCK_MSG_DONTWAIT,
+			     (struct net_sockaddr *)&addr_recv, &addrlen);
+	zexpect_equal(ret, -1, "server received %d bytes from 0x%08x", ret,
+		      net_ntohl(addr_recv.sin_addr.s_addr));
+
+	ret = zsock_close(sock_c);
+	zassert_ok(ret, "close failed, %d", errno);
+	ret = zsock_close(sock_s);
+	zassert_ok(ret, "close failed, %d", errno);
 }
 
 static void test_rebinding_common(net_sa_family_t family)

@@ -6,21 +6,24 @@ Commands
 
 .. code-block:: console
 
-   iso --help
+   uart:~$ iso
    iso - Bluetooth ISO shell commands
    Subcommands:
-      cig_create  :[dir=tx,rx,txrx] [interval] [packing] [framing] [latency] [sdu]
-                  [phy] [rtn]
-      cig_term    :Terminate the CIG
-      connect     :Connect ISO Channel
-      listen      :<dir=tx,rx,txrx> [security level]
-      send        :Send to ISO Channel [count]
-      disconnect  :Disconnect ISO Channel
-      create-big  :Create a BIG as a broadcaster [enc <broadcast code>]
-      broadcast   :Broadcast on ISO channels
-      sync-big    :Synchronize to a BIG as a receiver <BIS bitfield> [mse] [timeout]
-                  [enc <broadcast code>]
-      term-big    :Terminate a BIG
+     cig_create        : [dir=tx,rx,txrx] [C to P interval] [P to C interval]
+                         [packing] [framing] [C to P latency] [P to C latency]
+                         [sdu] [phy] [rtn]
+     cig_term          : Terminate the CIG
+     connect           : Connect ISO Channel
+     listen            : <dir=tx,rx,txrx>
+     send              : Send to ISO Channel [count]
+     disconnect        : Disconnect ISO Channel
+     tx_sync_read_cis  : Read CIS TX sync info
+     create-big        : Create a BIG as a broadcaster [enc <broadcast code>]
+     broadcast         : Broadcast on ISO channels
+     tx_sync_read_bis  : Read BIS TX sync info
+     sync-big          : Synchronize to a BIG as a receiver <BIS bitfield> [mse
+                         <mse>] [timeout <timeout>] [enc <broadcast code>]
+     term-big          : Terminate a BIG
 
 
 Unicast examples
@@ -53,7 +56,7 @@ Requires to be connected:
 .. code-block:: console
 
    uart:~$ iso send
-   send: 40 bytes of data
+   send: 40 bytes of data with PSN 178
    ISO sending...
 
 
@@ -108,12 +111,12 @@ Setting up sync receiver
    uart:~$ bt init
    Bluetooth initialized
    uart:~$ bt scan on
-   [DEVICE]: 42:0F:7A:40:AE:21 (random), AD evt type 5, RSSI -27  C:0 S:0 D:0 SR:0 E:1 Prim: LE 1M, Secn: LE 2M, Interval: 0x0780 (2400000 us), SID: 0x0
-   uart:~$ bt per-adv-sync-create 42:0F:7A:40:AE:21 (random) 0
+   [DEVICE]: R:42:0F:7A:40:AE:21, AD evt type 5, RSSI -27  C:0 S:0 D:0 SR:0 E:1 Prim: LE 1M, Secn: LE 2M, Interval: 0x0780 (2400000 us), SID: 0x0
+   uart:~$ bt per-adv-sync-create R:42:0F:7A:40:AE:21 0
    Per adv sync pending
-   PER_ADV_SYNC[0]: [DEVICE]: 42:0F:7A:40:AE:21 (random) synced, Interval 0x0780 (2400000 us), PHY LE 2M, SD 0x0000, PAST peer not present
-   PER_ADV_SYNC[0]: [DEVICE]: 42:0F:7A:40:AE:21 (random), tx_power 127, RSSI -28, CTE 0, data length 0
-   BIG_INFO PER_ADV_SYNC[0]: [DEVICE]: 42:0F:7A:40:AE:21 (random), sid 0x00, num_bis 1, nse 0x04, interval 0x0008 (10000 us), bn 0x01, pto 0x01, irc 0x03, max_pdu 0x00f7, sdu_interval 0x2710, max_sdu 0x00f7, phy LE 2M, framing 0x00, not encrypted
+   PER_ADV_SYNC[0]: [DEVICE]: R:42:0F:7A:40:AE:21 synced, Interval 0x0780 (2400000 us), PHY LE 2M, SD 0x0000, PAST peer not present
+   PER_ADV_SYNC[0]: [DEVICE]: R:42:0F:7A:40:AE:21, tx_power 127, RSSI -28, CTE 0, data length 0
+   BIG_INFO PER_ADV_SYNC[0]: [DEVICE]: R:42:0F:7A:40:AE:21, sid 0x00, num_bis 1, nse 0x04, interval 0x0008 (10000 us), bn 0x01, pto 0x01, irc 0x03, max_pdu 0x00f7, sdu_interval 0x2710, max_sdu 0x00f7, phy LE 2M, framing 0x00, not encrypted
    uart:~$ iso sync-big 1
    BIG syncing
    ISO Channel 0x200008c0 connected

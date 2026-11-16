@@ -350,6 +350,10 @@ class RunnerCaps:
       can be given multiple times and is passed on to the underlying tool
       that the runner wraps.
 
+    - gdb_init: whether the runner supports a --gdb-init option, which can be
+      given multiple times and appends commands, in the order given, to the GDB
+      client invocation, after the ones the runner issues itself.
+
     - file: whether the runner supports a --file option, which specifies
       exactly the file that should be used to flash, overriding any default
       discovered in the build directory.
@@ -362,6 +366,11 @@ class RunnerCaps:
     - skip_load: whether the runner supports the --load/--no-load option, which
       allows skipping the load of image on target before starting a debug session
       (this option only affects the 'debug' command)
+
+    - baud_rate: whether the runner supports a --baud-rate option, which
+      sets the serial speed used to talk to the target. Runners providing
+      a default should do so with ``parser.set_defaults(baud_rate=...)``
+      in their do_add_parser() implementation.
     '''
 
     commands: set[str] = field(default_factory=lambda: set(_RUNNERCAPS_COMMANDS))
@@ -374,12 +383,14 @@ class RunnerCaps:
     reset_types_supported: list[str] | None = None
     extload: bool = False
     tool_opt: bool = False
+    gdb_init: bool = False
     file: bool = False
     hide_load_files: bool = False
     rtt: bool = False  # This capability exists separately from the rtt command
                        # to allow other commands to use the rtt address
     dry_run: bool = False
     skip_load: bool = False
+    baud_rate: bool = False
     batch_debug: bool = False # In batch mode, GDB exits with status 0 after loading;
                               # for automated debugging, add --batch with 'monitor go',
                               # 'disconnect', and 'quit' commands (named batch_debug in west),
@@ -700,6 +711,14 @@ class ZephyrBinaryRunner(abc.ABC):
                             help=(cls.tool_opt_help() if caps.tool_opt
                                   else argparse.SUPPRESS))
 
+        parser.add_argument('--gdb-init', dest='gdb_init',
+                            default=[], action='append',
+                            metavar='COMMAND',
+                            help=('command to run in the GDB client, after the '
+                                  'ones the runner issues itself; may be given '
+                                  'multiple times, in order'
+                                  if caps.gdb_init else argparse.SUPPRESS))
+
         if caps.rtt:
             parser.add_argument('--rtt-address', dest='rtt_address',
                                 type=lambda x: int(x, 0),
@@ -707,6 +726,11 @@ class ZephyrBinaryRunner(abc.ABC):
                                 it will be autodetected if possible""")
         else:
             parser.add_argument('--rtt-address', help=argparse.SUPPRESS)
+
+        parser.add_argument('--baud-rate', dest='baud_rate',
+                            help=("serial baud rate to use. "
+                                  "Default value depends on each specific runner."
+                                  if caps.baud_rate else argparse.SUPPRESS))
 
         parser.add_argument('--dry-run', action='store_true',
                             help=('''Print all the commands without actually
@@ -760,6 +784,8 @@ class ZephyrBinaryRunner(abc.ABC):
             _missing_cap(cls, '--extload')
         if args.tool_opt and not caps.tool_opt:
             _missing_cap(cls, '--tool-opt')
+        if args.gdb_init and not caps.gdb_init:
+            _missing_cap(cls, '--gdb-init')
         if args.file and not caps.file:
             _missing_cap(cls, '--file')
         if args.file_type and not caps.file:
@@ -768,6 +794,8 @@ class ZephyrBinaryRunner(abc.ABC):
             _missing_cap(cls, '--rtt-address')
         if args.dry_run and not caps.dry_run:
             _missing_cap(cls, '--dry-run')
+        if args.baud_rate and not caps.baud_rate:
+            _missing_cap(cls, '--baud-rate')
 
         ret = cls.do_create(cfg, args)
         if args.erase:
@@ -842,7 +870,8 @@ class ZephyrBinaryRunner(abc.ABC):
                              no chip could be identified. It is responsible
                              for opening and closing the port.
         :param target:      normalized chip name to match against.
-        :param logger:      logger for progress and diagnostics.
+        :param logger:      Python logger for progress and diagnostics, see
+                            ZephyrBinaryRunner class.
         :param priority_vids: optional list of USB VIDs whose ports are
                              probed first, to avoid resetting unrelated
                              serial adapters.
@@ -852,7 +881,7 @@ class ZephyrBinaryRunner(abc.ABC):
         try:
             import serial.tools.list_ports
         except ImportError as err:
-            logger.debug(f'port matching unavailable: {err}')
+            logger.error(f'serial port matching unavailable: {err}')
             return None
 
         priority_vids = priority_vids or []
@@ -936,6 +965,13 @@ class ZephyrBinaryRunner(abc.ABC):
                   by this runner. This can be given multiple times;
                   the resulting arguments will be given to the tool
                   in the order they appear on the command line.'''
+
+    @staticmethod
+    def gdb_ex_args(commands: list[str] | None) -> list[str]:
+        '''Turn GDB commands into '-ex', <command> pairs for a GDB argv.
+
+        The commands are passed on verbatim.'''
+        return [arg for command in (commands or []) for arg in ('-ex', command)]
 
     @staticmethod
     def require(program: str, path: str | None = None) -> str:

@@ -50,7 +50,7 @@ void i3c_addr_slots_set(struct i3c_addr_slots *slots, uint8_t dev_addr,
 	bitpos %= BITS_PER_LONG;
 
 	slots->slots[idx] &= ~((unsigned long)I3C_ADDR_SLOT_STATUS_MASK << bitpos);
-	slots->slots[idx] |= status << bitpos;
+	slots->slots[idx] |= (unsigned long)status << bitpos;
 }
 
 enum i3c_addr_slot_status i3c_addr_slots_status(struct i3c_addr_slots *slots, uint8_t dev_addr)
@@ -961,7 +961,7 @@ int i3c_bus_rstdaa_all(const struct device *dev)
 		LOG_DBG("%s: Reset dynamic address for device %s", dev->name,
 			desc->dev->name);
 		dret = i3c_detach_i3c_device(desc);
-		if (dret != 0) {
+		if ((dret != 0) && (dret != -EALREADY)) {
 			LOG_ERR("%s: failed to detach %s (%d)", dev->name,
 				desc->dev->name, dret);
 		}
@@ -1436,6 +1436,7 @@ int i3c_bus_init(const struct device *dev, const struct i3c_dev_list *dev_list)
 	struct i3c_ccc_events i3c_events;
 	struct i3c_config_controller ctrl_cfg;
 	uint32_t prev_od_high_ns;
+	uint32_t prev_tcas_ps;
 
 	/* Retrieve the active controller configuration */
 	ret = i3c_config_get_controller(dev, &ctrl_cfg);
@@ -1454,6 +1455,14 @@ int i3c_bus_init(const struct device *dev, const struct i3c_dev_list *dev_list)
 	prev_od_high_ns = ctrl_cfg.scl_od_min.high_ns;
 	ctrl_cfg.scl_od_min.high_ns = MAX(I3C_OD_FIRST_BC_THIGH_MIN_NS,
 					ctrl_cfg.scl_od_min.high_ns);
+
+	/*
+	 * tCAS is a separate timer from OD SCL high. 38.4 ns is below the
+	 * 50 ns I2C spike filter still enabled until 7E. Raise tCAS for
+	 * the first broadcasts (RSTACT / ENTDAA), then restore.
+	 */
+	prev_tcas_ps = ctrl_cfg.tcas_ps;
+	ctrl_cfg.tcas_ps = MAX(I3C_BUS_TCAS_FIRST_BC_MIN_PS, ctrl_cfg.tcas_ps);
 
 	ret = i3c_configure_controller(dev, &ctrl_cfg);
 	if (ret != 0) {
@@ -1488,14 +1497,6 @@ int i3c_bus_init(const struct device *dev, const struct i3c_dev_list *dev_list)
 
 	if (i3c_bus_rstdaa_all(dev) != 0) {
 		LOG_DBG("Broadcast RSTDAA was NACK.");
-	}
-
-	/* Set previously stored OD high period back */
-	ctrl_cfg.scl_od_min.high_ns = prev_od_high_ns;
-	ret = i3c_configure_controller(dev, &ctrl_cfg);
-	if (ret != 0) {
-		LOG_ERR("%s: Open Drain Normal speed set failed", dev->name);
-		return ret;
 	}
 
 	/*
@@ -1548,6 +1549,15 @@ int i3c_bus_init(const struct device *dev, const struct i3c_dev_list *dev_list)
 				LOG_ERR("DAA was not successful.");
 			}
 		}
+	}
+
+	/* Restore the configured OD high period and tCAS now that addressing is done */
+	ctrl_cfg.scl_od_min.high_ns = prev_od_high_ns;
+	ctrl_cfg.tcas_ps = prev_tcas_ps;
+	ret = i3c_configure_controller(dev, &ctrl_cfg);
+	if (ret != 0) {
+		LOG_ERR("%s: Open Drain Normal speed set failed", dev->name);
+		return ret;
 	}
 
 	/*

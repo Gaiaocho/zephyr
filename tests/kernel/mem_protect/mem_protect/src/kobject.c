@@ -1301,10 +1301,6 @@ ZTEST_USER(mem_protect_kobj, test_kobject_init_error)
 			"expected got NULL kobject");
 	zassert_is_null(k_object_alloc(K_OBJ_LAST),
 			"expected got NULL kobject");
-
-	/* futex not support */
-	zassert_is_null(k_object_alloc(K_OBJ_FUTEX),
-			"expected got NULL kobject");
 }
 
 /**
@@ -1321,7 +1317,7 @@ ZTEST(mem_protect_kobj, test_kobj_create_out_of_memory)
 {
 	int ttype;
 	int max_obj = 0;
-	void *create_obj[MAX_OBJ] = {0};
+	static void *create_obj[MAX_OBJ];
 
 	for (ttype = K_OBJ_MEM_SLAB; ttype < K_OBJ_CONDVAR ; ttype++) {
 

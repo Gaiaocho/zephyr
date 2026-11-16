@@ -6,6 +6,7 @@
 zephyr_library()
 
 zephyr_library_sources(soc.c)
+zephyr_library_sources_ifdef(CONFIG_CPU_HAS_CUSTOM_FIXED_SOC_MPU_REGIONS mpu_regions.c)
 if(CONFIG_SOC_RESET_HOOK AND CONFIG_SOC_LPC54114)
   zephyr_library_sources(gcc/startup_LPC54114_cm4.S)
 endif()
@@ -16,9 +17,19 @@ zephyr_library_include_directories(
   )
 
 
-# CMSIS SystemInit allows us to skip enabling clock to SRAM2 bank via
-# this compiler definition
-if(NOT DEFINED CONFIG_LPC54XXX_SRAM2_CLOCK)
+if(DEFINED CONFIG_LPC54XXX_USB_RAM)
+  zephyr_linker_sources_ifdef(CONFIG_USB_DEVICE_DRIVER SECTIONS usb.ld)
+  zephyr_linker_sources_ifdef(CONFIG_UDC_DRIVER SECTIONS usb.ld)
+  zephyr_linker_sources_ifdef(CONFIG_UHC_DRIVER SECTIONS usb.ld)
+
+  zephyr_compile_definitions_ifdef(CONFIG_USB_DEVICE_DRIVER USB_STACK_USE_DEDICATED_RAM=1)
+  zephyr_compile_definitions_ifdef(CONFIG_UDC_DRIVER USB_STACK_USE_DEDICATED_RAM=1)
+  zephyr_compile_definitions_ifdef(CONFIG_UHC_DRIVER USB_STACK_USE_DEDICATED_RAM=1)
+endif()
+
+# CMSIS SystemInit allows us to skip enabling the clock to the RAM banks that
+# are disabled out of reset, via this compiler definition
+if(NOT DEFINED CONFIG_SOC_SERIES_LPC54XXX_SRAM_CLOCKS)
 zephyr_compile_definitions(DONT_ENABLE_DISABLED_RAMBANKS=1)
 endif()
 

@@ -26,7 +26,9 @@ def _import_runner_module(runner_name):
 
 _names = [
     # zephyr-keep-sorted-start
+    'alif_flash',
     'amebaflash',
+    'bflb_flash_command',
     'bflb_mcu_tool',
     'blackmagicprobe',
     'bossac',
@@ -54,6 +56,7 @@ _names = [
     'nrfutil',
     'nsim',
     'nxp_s32dbg',
+    'openfpgaloader',
     'openocd',
     'probe_rs',
     'pyocd',
@@ -74,6 +77,7 @@ _names = [
     'teensy',
     'trace32',
     'uf2',
+    'vegadude',
     'wchisp',
     'wlink',
     'xsdb',

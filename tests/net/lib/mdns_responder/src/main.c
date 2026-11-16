@@ -234,7 +234,12 @@ static int sender_iface(const struct device *dev, struct net_pkt *pkt)
 	if (test_started) {
 		hdr = NET_IPV6_HDR(pkt);
 
-		if (net_ipv6_addr_cmp_raw(hdr->dst, mdns_server_ipv6_addr)) {
+		/* Answers to a query from port 5353 go to the group; an answer
+		 * to a one-off lookup goes back to the querier alone, so both
+		 * destinations have to be picked up here.
+		 */
+		if (net_ipv6_addr_cmp_raw(hdr->dst, mdns_server_ipv6_addr) ||
+		    net_ipv6_addr_cmp_raw(hdr->dst, (const uint8_t *)&sender_ll_addr)) {
 			/* Multi-homed test: grab the outgoing mDNS response separately. */
 			if (mh_capture_active && mh_response_pkt == NULL &&
 			    mh_mdns_udp_pkt(pkt)) {
@@ -252,7 +257,7 @@ static int sender_iface(const struct device *dev, struct net_pkt *pkt)
 	return 0;
 }
 
-static struct dummy_api net_iface_api = {
+static DEVICE_API(dummy, net_iface_api) = {
 	.iface_api.init = net_iface_init,
 	.send = sender_iface,
 };
@@ -297,7 +302,7 @@ static void net_iface_init2(struct net_if *iface)
 	net_if_flag_set(iface, NET_IF_IPV6_NO_ND);
 }
 
-static struct dummy_api net_iface_api2 = {
+static DEVICE_API(dummy, net_iface_api2) = {
 	.iface_api.init = net_iface_init2,
 	.send = sender_iface,
 };
@@ -335,8 +340,6 @@ static void *test_setup(void)
 		records[i].text = services[i].text;
 		records[i].port = &services[i].port;
 	}
-
-	mdns_responder_set_ext_records(records, EXT_RECORDS_NUM);
 
 	/* The semaphore is there to wait the data to be received. */
 	k_sem_init(&wait_data, 0, UINT_MAX);
@@ -399,6 +402,10 @@ static void before(void *d)
 {
 	ARG_UNUSED(d);
 
+	/* Re-register every time: a test may unregister the records */
+	zassert_ok(mdns_responder_set_ext_records(records, EXT_RECORDS_NUM),
+		   "Failed to register the external records");
+
 	responses_count = 0;
 	test_started = true;
 }
@@ -430,7 +437,11 @@ static void cleanup(void *d)
 	mh_reset_capture();
 }
 
-static void send_msg(const uint8_t *data, size_t len)
+/* A query from port 5353 is one multicast DNS responder talking to another; a
+ * query from anywhere else is a one-off lookup, which RFC 6762 6.7 answers
+ * differently. Tests that care say which they are sending.
+ */
+static void send_msg_from_port(const uint8_t *data, size_t len, uint16_t src_port)
 {
 	struct net_pkt *pkt;
 	int res;
@@ -448,7 +459,7 @@ static void send_msg(const uint8_t *data, size_t len)
 	res = net_pkt_write(pkt, ipv6_hdr_rest, sizeof(ipv6_hdr_rest));
 	zassert_equal(res, 0, "pkt write for rest of the header failed");
 
-	res = net_pkt_write_be16(pkt, 5353);
+	res = net_pkt_write_be16(pkt, src_port);
 	zassert_equal(res, 0, "pkt write for UDP src port failed");
 
 	res = net_pkt_write_be16(pkt, 5353);
@@ -466,6 +477,11 @@ static void send_msg(const uint8_t *data, size_t len)
 
 	res = net_recv_data(iface1, pkt);
 	zassert_equal(res, 0, "net_recv_data() failed");
+}
+
+static void send_msg(const uint8_t *data, size_t len)
+{
+	send_msg_from_port(data, len, 5353);
 }
 
 static struct dns_sd_rec *alloc_ext_record(const char *instance, const char *service,
@@ -579,6 +595,53 @@ ZTEST(test_mdns_responder, test_external_records)
 				     sizeof(payload_custom_tcp_local));
 }
 
+/* NULL with a zero count unregisters the external records, so only the
+ * statically registered services are enumerated afterwards.
+ */
+ZTEST(test_mdns_responder, test_external_records_clear)
+{
+	int res;
+
+	zassert_not_null(alloc_ext_record("bar", "_foo", "_tcp", "local", NULL, 0, 5353),
+			 "Failed to alloc the record");
+
+	zassert_equal(mdns_responder_set_ext_records(NULL, 1), -EINVAL,
+		      "NULL records with a non-zero count must be rejected");
+	zassert_equal(mdns_responder_set_ext_records(records, 0), -EINVAL,
+		      "Zero count with non-NULL records must be rejected");
+
+	zassert_ok(mdns_responder_set_ext_records(NULL, 0),
+		   "Failed to unregister the external records");
+
+	send_msg(dns_sd_service_enumeration_query, sizeof(dns_sd_service_enumeration_query));
+
+	/* Expect the static service only */
+	res = k_sem_take(&wait_data, RESPONSE_TIMEOUT);
+	zassert_ok(res, "Did not receive a response");
+
+	check_service_type_enum_resp(response_pkts[0], payload_foo_udp_local,
+				     sizeof(payload_foo_udp_local));
+
+	res = k_sem_take(&wait_data, RESPONSE_TIMEOUT);
+	zassert_equal(res, -EAGAIN, "Unexpected response after unregistering the records");
+
+	/* Registering again brings the external record back */
+	zassert_ok(mdns_responder_set_ext_records(records, EXT_RECORDS_NUM),
+		   "Failed to register the external records");
+
+	send_msg(dns_sd_service_enumeration_query, sizeof(dns_sd_service_enumeration_query));
+
+	for (int i = 0; i < 2; ++i) {
+		res = k_sem_take(&wait_data, RESPONSE_TIMEOUT);
+		zassert_ok(res, "Did not receive a response number %d", i + 1);
+	}
+
+	check_service_type_enum_resp(response_pkts[1], payload_foo_udp_local,
+				     sizeof(payload_foo_udp_local));
+	check_service_type_enum_resp(response_pkts[2], payload_foo_tcp_local,
+				     sizeof(payload_foo_tcp_local));
+}
+
 static void skip_labels(struct net_pkt *pkt)
 {
 	uint8_t label_len;
@@ -681,6 +744,67 @@ ZTEST(test_mdns_responder, test_basic_query)
 	check_basic_query_resp(response_pkts[0]);
 }
 
+/* RFC 6762 6.7: a query that did not come from port 5353 is a one-off lookup,
+ * and the answer to it has to be one a conventional resolver understands. It
+ * repeats the identifier and the question, leaves the cache flush bit clear,
+ * and carries a short time to live, because whatever caches it is not a
+ * multicast DNS cache.
+ */
+ZTEST(test_mdns_responder, test_legacy_unicast_query)
+{
+	static const uint16_t query_id = 0x1234;
+	static uint8_t zephyr_local_query[] = {
+		/* Header, with an identifier the answer has to repeat */
+		0x12, 0x34, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		/* zephyr.local */
+		0x06, 0x7a, 0x65, 0x70, 0x68, 0x79, 0x72, 0x05, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00,
+		/* AAAA record */
+		0x00, 0x1c, 0x00, 0x01
+	};
+	struct dns_header resp_header;
+	struct dns_rr resp_record;
+	uint16_t qtype;
+	uint16_t qclass;
+	struct net_pkt *pkt;
+
+	/* Anything other than 5353 makes this a one-off lookup */
+	send_msg_from_port(zephyr_local_query, sizeof(zephyr_local_query), 45678);
+
+	zassert_ok(k_sem_take(&wait_data, RESPONSE_TIMEOUT), "Did not receive a response");
+
+	pkt = response_pkts[0];
+	net_pkt_cursor_init(pkt);
+	net_pkt_set_overwrite(pkt, true);
+	zassert_ok(net_pkt_skip(pkt, NET_IPV6UDPH_LEN), "net_pkt skip failed");
+
+	zassert_ok(net_pkt_read(pkt, &resp_header, sizeof(resp_header)), "net_pkt read failed");
+	zassert_equal(net_ntohs(resp_header.id), query_id,
+		      "Answer carries id 0x%04x, the query used 0x%04x",
+		      net_ntohs(resp_header.id), query_id);
+	zassert_equal(net_ntohs(resp_header.qdcount), 1,
+		      "Answer does not repeat the question");
+	zassert_true(net_ntohs(resp_header.ancount) >= 1, "Answer carries no records");
+
+	/* The repeated question */
+	validate_label(pkt, "zephyr", false);
+	validate_label(pkt, "local", true);
+	zassert_ok(net_pkt_read_be16(pkt, &qtype), "net_pkt read failed");
+	zassert_equal(qtype, DNS_RR_TYPE_AAAA, "Repeated question has the wrong type");
+	zassert_ok(net_pkt_read_be16(pkt, &qclass), "net_pkt read failed");
+	zassert_equal(qclass, DNS_CLASS_IN, "Repeated question has the wrong class");
+
+	/* The first answer, which names the question rather than repeating it */
+	skip_labels(pkt);
+	zassert_ok(net_pkt_read(pkt, &resp_record, sizeof(resp_record)), "net_pkt read failed");
+	zassert_equal(net_ntohs(resp_record.type), DNS_RR_TYPE_AAAA, "Invalid record type");
+	zassert_equal(net_ntohs(resp_record.class_), DNS_CLASS_IN,
+		      "Answer class is 0x%04x; the cache flush bit does not belong here",
+		      net_ntohs(resp_record.class_));
+	zassert_true(net_ntohl(resp_record.ttl) <= 10,
+		     "Answer TTL is %u, which is too long to hand to a cache that "
+		     "knows nothing of multicast DNS", net_ntohl(resp_record.ttl));
+}
+
 static void check_basic_dns_sd_query_resp(struct net_pkt *pkt)
 {
 	struct dns_header resp_header;
@@ -766,6 +890,93 @@ ZTEST(test_mdns_responder, test_basic_dns_sd_query)
 	zassert_ok(res, "Did not receive a response");
 
 	check_basic_dns_sd_query_resp(response_pkts[0]);
+}
+
+static void check_direct_dns_sd_query_resp(struct net_pkt *pkt, enum dns_rr_type qtype,
+					   uint16_t additional_count)
+{
+	struct dns_header resp_header;
+	struct dns_rr resp_record;
+
+	net_pkt_cursor_init(pkt);
+	net_pkt_set_overwrite(pkt, true);
+
+	zassert_ok(net_pkt_skip(pkt, NET_IPV6UDPH_LEN), "net_pkt skip failed");
+	zassert_ok(net_pkt_read(pkt, &resp_header, sizeof(resp_header)), "net_pkt read failed");
+	zassert_equal(net_ntohs(resp_header.ancount), 1, "Invalid answer count");
+	zassert_equal(net_ntohs(resp_header.arcount), additional_count,
+		      "Invalid additional record count");
+
+	validate_label(pkt, "zephyr", false);
+	validate_label(pkt, "_foo", false);
+	validate_label(pkt, "_udp", false);
+	validate_label(pkt, "local", true);
+
+	zassert_ok(net_pkt_read(pkt, &resp_record, sizeof(resp_record)), "net_pkt read failed");
+	zassert_equal(net_ntohs(resp_record.type), qtype, "Invalid record type");
+}
+
+ZTEST(test_mdns_responder, test_direct_dns_sd_srv_query)
+{
+	static const uint8_t query[] = {
+		/* Header */
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		/* zephyr._foo._udp.local */
+		0x06, 0x7a, 0x65, 0x70, 0x68, 0x79, 0x72,
+		0x04, 0x5f, 0x66, 0x6f, 0x6f,
+		0x04, 0x5f, 0x75, 0x64, 0x70,
+		0x05, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00,
+		/* SRV record */
+		0x00, 0x21, 0x00, 0x01,
+	};
+
+	send_msg(query, sizeof(query));
+
+	zassert_ok(k_sem_take(&wait_data, RESPONSE_TIMEOUT), "Did not receive an SRV response");
+	check_direct_dns_sd_query_resp(response_pkts[0], DNS_RR_TYPE_SRV, 2U);
+}
+
+ZTEST(test_mdns_responder, test_direct_dns_sd_txt_query)
+{
+	static const uint8_t query[] = {
+		/* Header */
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		/* zephyr._foo._udp.local */
+		0x06, 0x7a, 0x65, 0x70, 0x68, 0x79, 0x72,
+		0x04, 0x5f, 0x66, 0x6f, 0x6f,
+		0x04, 0x5f, 0x75, 0x64, 0x70,
+		0x05, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00,
+		/* TXT record */
+		0x00, 0x10, 0x00, 0x01,
+	};
+
+	send_msg(query, sizeof(query));
+
+	zassert_ok(k_sem_take(&wait_data, RESPONSE_TIMEOUT), "Did not receive a TXT response");
+	check_direct_dns_sd_query_resp(response_pkts[0], DNS_RR_TYPE_TXT, 0U);
+}
+
+ZTEST(test_mdns_responder, test_service_type_srv_txt_queries_have_no_response)
+{
+	uint8_t query[] = {
+		/* Header */
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		/* _foo._udp.local */
+		0x04, 0x5f, 0x66, 0x6f, 0x6f,
+		0x04, 0x5f, 0x75, 0x64, 0x70,
+		0x05, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00,
+		/* SRV record, IN class */
+		0x00, 0x21, 0x00, 0x01,
+	};
+
+	send_msg(query, sizeof(query));
+	zassert_equal(k_sem_take(&wait_data, RESPONSE_TIMEOUT), -EAGAIN,
+		      "Unexpected SRV response for a service type");
+
+	query[sizeof(query) - 3] = 0x10;
+	send_msg(query, sizeof(query));
+	zassert_equal(k_sem_take(&wait_data, RESPONSE_TIMEOUT), -EAGAIN,
+		      "Unexpected TXT response for a service type");
 }
 
 /* Verify a PTR answer's name is exactly service.proto.domain (three labels,

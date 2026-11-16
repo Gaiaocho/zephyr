@@ -218,14 +218,14 @@ static void tma525b_isr_handler(const struct device *dev, struct gpio_callback *
 {
 	struct tma525b_data *data = CONTAINER_OF(cb, struct tma525b_data, int_gpio_cb);
 
-	k_work_submit(&data->work);
+	input_work_submit(&data->work);
 }
 #else
 static void tma525b_timer_handler(struct k_timer *timer)
 {
 	struct tma525b_data *data = CONTAINER_OF(timer, struct tma525b_data, timer);
 
-	k_work_submit(&data->work);
+	input_work_submit(&data->work);
 }
 #endif
 
@@ -235,6 +235,7 @@ static int tma525b_chip_init(const struct device *dev)
 	uint8_t read_buf[2];
 	int ret;
 	int retry = 0;
+	bool ready = false;
 
 	/* Power on sequence */
 	if (config->pwr_gpio.port != NULL) {
@@ -264,6 +265,7 @@ static int tma525b_chip_init(const struct device *dev)
 			if ((read_buf[0] == 0x02U && read_buf[1] == 0x00U) ||
 			    read_buf[1] == 0xFFU) {
 				LOG_INF("TMA525B entered application mode");
+				ready = true;
 				break;
 			}
 		}
@@ -271,7 +273,7 @@ static int tma525b_chip_init(const struct device *dev)
 		retry++;
 	}
 
-	if (retry == 0U) {
+	if (!ready) {
 		LOG_ERR("TMA525B failed to enter application mode");
 		return -ENODEV;
 	}

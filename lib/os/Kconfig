@@ -39,7 +39,6 @@ config PRINTK_SYNC
 
 config MPSC_PBUF
 	bool "Multi producer, single consumer packet buffer"
-	select TIMEOUT_64BIT
 	help
 	  Enable usage of mpsc packet buffer. Packet buffer is capable of
 	  storing variable length packets in a circular way and operate directly
@@ -209,6 +208,12 @@ config BOOTARGS_ARGS_BUFFER_SIZE
 	  Configures size of buffer containing all arguments passed to main.
 
 endif # BOOTARGS
+
+config BOOT_FDT
+	bool "Boot firmware device tree helpers"
+	help
+	  Enable helpers for validating and copying boot firmware device tree
+	  blobs into caller-owned storage.
 
 rsource "Kconfig.atomics"
 rsource "Kconfig.cbprintf"

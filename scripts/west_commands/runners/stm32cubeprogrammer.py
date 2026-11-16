@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from runners.core import RunnerCaps, RunnerConfig, ZephyrBinaryRunner
+from runners.st_common import STM32CubeCLI
 
 
 class STM32CubeProgrammerBinaryRunner(ZephyrBinaryRunner):
@@ -65,18 +66,13 @@ class STM32CubeProgrammerBinaryRunner(ZephyrBinaryRunner):
 
         self._reset_mode = reset_mode
         self._conn_modifiers = conn_modifiers
-        self._cli = (
-            cli or STM32CubeProgrammerBinaryRunner._get_stm32cubeprogrammer_path()
-        )
+        self._cli = cli or self._get_stm32cubeprogrammer_path()
         self._use_elf = use_elf
         self._erase = erase
         self._reset = reset_system
 
         if extload:
-            p = (
-                STM32CubeProgrammerBinaryRunner._get_stm32cubeprogrammer_path().parent.resolve()
-                / 'ExternalLoader'
-            )
+            p = self._cli.parent.resolve() / 'ExternalLoader'
             self._extload = ['-el', str(p / extload)]
         else:
             self._extload = []
@@ -89,9 +85,15 @@ class STM32CubeProgrammerBinaryRunner(ZephyrBinaryRunner):
         if platform.system() == "Linux":
             os.environ["LD_LIBRARY_PATH"] = str(self._cli.parent / ".." / "lib")
 
-    @staticmethod
-    def _get_stm32cubeprogrammer_path() -> Path:
+    def _get_stm32cubeprogrammer_path(self) -> Path:
         """Obtain path of the STM32CubeProgrammer CLI tool."""
+
+        # Attempt to find using STM32CubeCLI
+        stm32cubecli = STM32CubeCLI.getTool(self.logger)
+        if stm32cubecli is not None:
+            programmer = stm32cubecli.search_tool("programmer")
+            if programmer is not None:
+                return programmer
 
         if platform.system() == "Linux":
             cmd = shutil.which("STM32_Programmer_CLI")
@@ -130,27 +132,22 @@ class STM32CubeProgrammerBinaryRunner(ZephyrBinaryRunner):
             if cmd is not None:
                 return Path(cmd)
 
-            match platform.machine():
-                case "arm64":
-                    subdir = "Resources"
-                case "x86_64":
-                    subdir = "MacOs"
-                case other:
-                    raise NotImplementedError(
-                        f"Unsupported macOS architecture: {other}"
-                    )
-
-            return (
+            app_path = (
                 Path("/Applications")
                 / "STMicroelectronics"
                 / "STM32Cube"
                 / "STM32CubeProgrammer"
                 / "STM32CubeProgrammer.app"
                 / "Contents"
-                / subdir
-                / "bin"
-                / "STM32_Programmer_CLI"
             )
+
+            exe_path = app_path / "MacOS/bin/STM32_Programmer_CLI"
+
+            if not exe_path.exists():
+                # Some older STM32CubeProgrammer versions place
+                # the executable in a "Resources" subfolder instead
+                exe_path = app_path / "Resources/bin/STM32_Programmer_CLI"
+            return exe_path
 
         raise NotImplementedError("Could not determine STM32_Programmer_CLI path")
 

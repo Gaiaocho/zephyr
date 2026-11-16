@@ -33,7 +33,6 @@ these references:
 
 - `MCX E24x Series Microcontrollers Website`_
 - `FRDM-MCXE247 Website`_
-- `FRDM-MCXE247 Quick Reference Guide`_
 - `FRDM-MCXE247 Getting Started`_
 
 Supported Features
@@ -79,6 +78,26 @@ PORTB/GPIOB, PORTC/GPIOC, PORTD/GPIOD, and PORTE/GPIOE).
 | PTE5  | FLEXCAN0    | CAN0 TX                   |
 +-------+-------------+---------------------------+
 | PTE4  | FLEXCAN0    | CAN0 RX                   |
++-------+-------------+---------------------------+
+| PTC0  | RMII_RXD1   | Ethernet (LAN8741A PHY)   |
++-------+-------------+---------------------------+
+| PTC1  | RMII_RXD0   | Ethernet (LAN8741A PHY)   |
++-------+-------------+---------------------------+
+| PTC17 | RMII_RX_DV  | Ethernet (LAN8741A PHY)   |
++-------+-------------+---------------------------+
+| PTC2  | RMII_TXD0   | Ethernet (LAN8741A PHY)   |
++-------+-------------+---------------------------+
+| PTD7  | RMII_TXD1   | Ethernet (LAN8741A PHY)   |
++-------+-------------+---------------------------+
+| PTD12 | RMII_TX_EN  | Ethernet (LAN8741A PHY)   |
++-------+-------------+---------------------------+
+| PTD11 | RMII_TX_CLK | Ethernet 50 MHz REF_CLK   |
++-------+-------------+---------------------------+
+| PTB4  | MII_MDIO    | Ethernet PHY management   |
++-------+-------------+---------------------------+
+| PTE8  | MII_MDC     | Ethernet PHY management   |
++-------+-------------+---------------------------+
+| PTC3  | GPIO        | Ethernet PHY reset        |
 +-------+-------------+---------------------------+
 
 System Clock
@@ -179,6 +198,27 @@ should see the following message in the terminal:
    *** Booting Zephyr OS build v4.1.0-5194-ge7d44ce91cb3 ***
    Hello World! frdm_mcxe247/mcxe247
 
+QSPI Flash
+**********
+
+The FRDM-MCXE247 board is populated with an on-board Winbond W25Q64
+(64 Mbit) QSPI NOR flash. The QSPI data and clock signals are not connected
+to the flash by default, so the ``w25q64`` node is disabled on the default
+board target and enabled by the ``w25q64`` board revision.
+
+.. note::
+   In order to use the on-board QSPI flash, populate resistors R120, R122,
+   R124, R126, R129 and R130, and remove resistors R164 and R165.
+
+Once the rework is done, build for the ``frdm_mcxe247@w25q64`` revision to
+exercise the flash with the MSPI flash sample
+(``samples/drivers/mspi/mspi_flash``):
+
+.. zephyr-app-commands::
+   :zephyr-app: samples/drivers/mspi/mspi_flash
+   :board: frdm_mcxe247@w25q64
+   :goals: flash
+
 .. include:: ../../common/board-footer.rst.inc
 
 .. _MCX E24x Series Microcontrollers Website:
@@ -186,9 +226,6 @@ should see the following message in the terminal:
 
 .. _FRDM-MCXE247 Website:
    https://www.nxp.com/design/design-center/development-boards-and-designs/FRDM-MCXE247
-
-.. _FRDM-MCXE247 Quick Reference Guide:
-   https://www.nxp.com/docs/en/quick-reference-guide/MCXE247QSG.pdf
 
 .. _FRDM-MCXE247 Getting Started:
    https://www.nxp.com/document/guide/getting-started-with-the-frdm-mcxe247-board:GS-FRDM-MCXE247

@@ -51,6 +51,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/toolchain.h>
+#include <kspinlock.h>
 #include <ksched.h>
 #include <scheduler.h>
 #include <kthread.h>
@@ -74,11 +75,25 @@ LOG_MODULE_DECLARE(os, CONFIG_KERNEL_LOG_LEVEL);
 static struct k_spinlock mutex_lock;
 
 #ifdef CONFIG_OBJ_CORE_MUTEX
-static struct k_obj_type obj_type_mutex;
+K_OBJ_TYPE_DEFINE(obj_type_mutex, k_mutex, K_OBJ_TYPE_MUTEX_ID, NULL);
 #endif /* CONFIG_OBJ_CORE_MUTEX */
 
-int z_impl_k_mutex_init(struct k_mutex *mutex)
+/*
+ * Reset the mutex under mutex_lock so a concurrent k_mutex_lock() cannot
+ * observe a half-initialized object. With refuse_if_owned set, a mutex that
+ * has an owner is left untouched: resetting it would leave its held_node
+ * linked in the owner's held_mutexes list and reset the wait queue under
+ * pending waiters (threads only pend while the mutex has an owner).
+ */
+static int mutex_init(struct k_mutex *mutex, bool refuse_if_owned)
 {
+	k_spinlock_key_t key = k_spin_lock(&mutex_lock);
+
+	if (refuse_if_owned && (mutex->owner != NULL)) {
+		k_spin_unlock(&mutex_lock, key);
+		return -EBUSY;
+	}
+
 	mutex->owner = NULL;
 	mutex->lock_count = 0U;
 
@@ -87,6 +102,8 @@ int z_impl_k_mutex_init(struct k_mutex *mutex)
 #if Z_MUTEX_PI_ENABLED
 	mutex->held_node.next = NULL;
 #endif
+
+	k_spin_unlock(&mutex_lock, key);
 
 	k_object_init(mutex);
 
@@ -99,11 +116,25 @@ int z_impl_k_mutex_init(struct k_mutex *mutex)
 	return 0;
 }
 
+int z_impl_k_mutex_init(struct k_mutex *mutex)
+{
+	return mutex_init(mutex, false);
+}
+
 #ifdef CONFIG_USERSPACE
 static inline int z_vrfy_k_mutex_init(struct k_mutex *mutex)
 {
+	bool initialized;
+
 	K_OOPS(K_SYSCALL_OBJ_INIT(mutex, K_OBJ_MUTEX));
-	return z_impl_k_mutex_init(mutex);
+
+	/* The owner field is only meaningful once the mutex was initialized */
+	initialized = (k_object_find(mutex)->flags & K_OBJ_FLAG_INITIALIZED) != 0U;
+
+	K_OOPS(K_SYSCALL_VERIFY_MSG(mutex_init(mutex, initialized) == 0,
+				    "mutex %p is locked", mutex));
+
+	return 0;
 }
 #include <zephyr/syscalls/k_mutex_init_mrsh.c>
 #endif /* CONFIG_USERSPACE */
@@ -153,7 +184,7 @@ static int32_t held_mutexes_highest_waiter_prio(struct k_thread *thread,
 		SYS_SLIST_FOR_EACH_NODE(&thread->held_mutexes, node) {
 			struct k_mutex *m =
 				CONTAINER_OF(node, struct k_mutex, held_node);
-			struct k_thread *waiter = z_waitq_head(&m->wait_q);
+			struct k_thread *waiter = z_waitq_head_locked(&m->wait_q);
 
 			if (waiter != NULL) {
 				int32_t wprio = z_get_new_prio_with_ceiling(waiter->base.prio);
@@ -438,8 +469,8 @@ int z_impl_k_mutex_unlock(struct k_mutex *mutex)
 #endif
 
 	/* Pick the new owner (if any) and complete the wake atomically
-	 * under _sched_spinlock, so a racing in-flight timeout handler
-	 * cannot observe a half-initialized wake-up.
+	 * under the scheduler's spinlock, so a racing in-flight timeout
+	 * handler cannot observe a half-initialized wake-up.
 	 */
 	LOCK_SCHED_SPINLOCK {
 		new_owner = z_unpend_first_thread_locked(&mutex->wait_q);
@@ -489,7 +520,3 @@ static inline int z_vrfy_k_mutex_unlock(struct k_mutex *mutex)
 }
 #include <zephyr/syscalls/k_mutex_unlock_mrsh.c>
 #endif /* CONFIG_USERSPACE */
-
-#ifdef CONFIG_OBJ_CORE_MUTEX
-K_OBJ_TYPE_DEFINE(obj_type_mutex, k_mutex, K_OBJ_TYPE_MUTEX_ID, NULL);
-#endif /* CONFIG_OBJ_CORE_MUTEX */

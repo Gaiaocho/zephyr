@@ -71,7 +71,7 @@ _not_checking_user_context:
 	rsr a2, ZSR_A0SAVE
 	s32i a2, a0, ___xtensa_irq_bsa_t_a0_OFFSET
 	rsr.ps a2
-	movi a3, ~PS_OWB_MASK & ~PS_EXCM_MASK
+	movi a3, ~(PS_OWB_MASK | PS_EXCM_MASK | PS_INTLEVEL_MASK)
 	and a2, a2, a3
 	s32i a2, a0, ___xtensa_irq_bsa_t_ps_OFFSET
 
@@ -246,6 +246,16 @@ xtensa_userspace_enter:
 	 */
 	entry a1, 16
 
+	/* Mask interrupts while the register windows are spilled below.
+	 * SPILL_ALL_WINDOWS rotates WINDOWBASE, so an interrupt taken in
+	 * the middle of it would save its frame relative to the A1 of
+	 * whichever register window is visible at that moment, corrupting
+	 * the stack of the interrupted frames.
+	 *
+	 * Interrupts stay masked until the rfi below.
+	 */
+	rsil a0, 0xf
+
 	SPILL_ALL_WINDOWS
 
 	/* We have to switch to kernel stack before spill kernel data and
@@ -325,7 +335,7 @@ xtensa_userspace_enter:
 
 	wsr.ZSR_EPS a0
 
-	/* Wipe out a0 (thre is no return from this function */
+	/* Wipe out a0 (there is no return from this function */
 	movi a0, 0
 
 	rfi ZSR_RFI_LEVEL

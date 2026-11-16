@@ -1,6 +1,6 @@
 /*
- * SPDX-FileCopyrightText: <text>Copyright (c) 2026 Infineon Technologies AG,
- * or an affiliate of Infineon Technologies AG. All rights reserved.</text>
+ * SPDX-FileCopyrightText: Copyright (c) 2026 Infineon Technologies AG,
+ * SPDX-FileCopyrightText: or an affiliate of Infineon Technologies AG. All rights reserved.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -111,4 +111,17 @@
 	drive-push-pull;
 	input-enable;
 	drive-strength = "half";
+};
+
+/* Configure pin drive mode for the Arduino SPI pins */
+&p16_1_scb10_spi_m_mosi {
+	drive-push-pull;
+};
+
+&p16_2_scb10_spi_m_miso {
+	input-enable;
+};
+
+&p16_0_scb10_spi_m_clk {
+	drive-push-pull;
 };

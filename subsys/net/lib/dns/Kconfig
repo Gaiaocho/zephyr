@@ -28,6 +28,16 @@ config MDNS_RESOLVER
 	  When the mDNS responder is not enabled, the resolver joins the mDNS
 	  multicast groups itself.
 
+config MDNS_RESOLVER_AUTO_ADD_UNSCOPED
+	bool "Auto-add unscoped mDNS server to the default resolver"
+	depends on MDNS_RESOLVER
+	default y
+	help
+	  When dns_resolve_init_default() runs (auto-init or a manual call),
+	  append unscoped mDNS servers to the default resolver server list.
+	  Disable on multi-interface systems that configure mDNS per
+	  interface to avoid UDP/5353 bind collisions.
+
 config LLMNR_RESOLVER
 	bool "LLMNR support [DEPRECATED]"
 	select DEPRECATED
@@ -55,10 +65,15 @@ config DNS_RESOLVER_ADDITIONAL_QUERIES
 
 config DNS_RESOLVER_AI_MAX_ENTRIES
 	int "Maximum number of IP addresses for DNS name"
+	default 4 if NET_IPV4 && NET_IPV6
 	default 2
 	help
 	  Defines the max number of IP addresses per domain name
-	  resolution the DNS resolver can handle.
+	  resolution the DNS resolver can handle. The dual-stack default
+	  leaves room for two addresses per family.
+	  With DNS_RESOLVER_CACHE, resolving a name uses a stack array of this
+	  many struct dns_addrinfo entries (80 bytes each on 32-bit platforms
+	  with the default name length).
 
 config DNS_RESOLVER_MAX_ANSWER_SIZE
 	int "Max length of a DNS answer"
@@ -459,6 +474,7 @@ endif # LLMNR_RESPONDER
 
 config DNS_SD
 	bool "DNS Service Discovery"
+	select NET_SOCKETS_OFFLOAD_PORT_TRACKING if NET_SOCKETS_OFFLOAD
 	help
 	  This option enables DNS Service Discovery for Zephyr. It can
 	  be enabled for virtually any network service with only a few
@@ -474,6 +490,26 @@ module-help = Enables DNS Service Discovery code to output debug messages.
 source "subsys/net/Kconfig.template.log_config.net"
 
 endif # DNS_SD
+
+config DNS_RESOLVER_RANDOMIZE_SOURCE_PORT
+	bool "Use a fresh source port for each query"
+	depends on DNS_RESOLVER
+	default y
+	help
+	  Ask the system for a new local port before sending a query to a
+	  server that has nothing outstanding, so that consecutive queries do
+	  not leave from the same one.
+
+	  RFC 5452 section 9.2 asks for this. An attacker who cannot see a
+	  query has to guess both the 16 bit identifier and the source port to
+	  forge an answer to it; a port that never changes is one of the two
+	  given away, and it is learned from any single query.
+
+	  This costs a socket being closed and reopened, and its dispatcher
+	  re-registered, before a query that follows an idle period. Turn it
+	  off where that matters more than the hardening does. Queries to
+	  multicast DNS and LLMNR are unaffected either way: those protocols
+	  fix the port.
 
 config DNS_RESOLVER_MAX_SERVERS_LIMIT
 	int

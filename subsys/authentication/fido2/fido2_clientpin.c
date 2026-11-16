@@ -3,6 +3,10 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+
+#undef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L /* Required for strnlen() */
+
 #include <zephyr/logging/log.h>
 #include <zephyr/authentication/fido2/fido2_storage.h>
 #include <zephyr/random/random.h>
@@ -78,22 +82,41 @@ static int decapsulate(const uint8_t *platform_key, size_t platform_key_len, uin
 	return 0;
 }
 
-static int verify(const uint8_t *key, const uint8_t *msg, size_t msg_len,
+/*
+ * Check pinUvAuthParam against HMAC-SHA-256(key, msg). The signature is
+ * the leftmost 16 bytes of the HMAC for protocol one and the whole HMAC
+ * for protocol two; any other length is rejected.
+ */
+static int verify(uint8_t protocol, const uint8_t *key, const uint8_t *msg, size_t msg_len,
 		  const uint8_t *pin_uv_auth_param, size_t pin_uv_auth_param_len)
 {
 	uint8_t mac[FIDO2_SHA256_SIZE];
+	size_t expected_len;
+	uint8_t diff = 0U;
 	int ret;
+
+	if (protocol == FIDO2_PIN_PROTOCOL_V1) {
+		expected_len = FIDO2_PIN_AUTH_SIZE_P1;
+	} else if (protocol == FIDO2_PIN_PROTOCOL_V2) {
+		expected_len = FIDO2_PIN_AUTH_SIZE_P2;
+	} else {
+		return -EINVAL;
+	}
+
+	if (pin_uv_auth_param_len != expected_len) {
+		return -EACCES;
+	}
 
 	ret = fido2_crypto_hmac_sha256(key, FIDO2_SHA256_SIZE, msg, msg_len, mac);
 	if (ret) {
 		return ret;
 	}
 
-	if (memcmp(mac, pin_uv_auth_param, pin_uv_auth_param_len) != 0) {
-		return -EACCES;
+	for (size_t i = 0; i < expected_len; i++) {
+		diff |= (uint8_t)(mac[i] ^ pin_uv_auth_param[i]);
 	}
 
-	return 0;
+	return (diff == 0U) ? 0 : -EACCES;
 }
 
 static int decrypt(uint8_t protocol, const uint8_t *ciphertext, size_t ciphertext_len,
@@ -205,7 +228,8 @@ int fido2_clientpin_pin_verify_pin_uv_auth_token(const uint8_t *msg, size_t msg_
 		return -EACCES;
 	}
 
-	return verify(pin_uv_auth_token, msg, msg_len, auth_param, auth_param_len);
+	return verify(pin_uv_auth_protocol, pin_uv_auth_token, msg, msg_len, auth_param,
+		      auth_param_len);
 }
 
 /* authenticatorClientPIN subCommands */
@@ -254,7 +278,8 @@ enum fido2_status fido2_clientpin_cmd_get_key_agreement(uint8_t *cbor_out, size_
 enum fido2_status fido2_clientpin_cmd_set_pin(uint8_t protocol, const uint8_t *platform_key,
 					      size_t platform_key_len, const uint8_t *new_pin_enc,
 					      size_t new_pin_enc_len,
-					      const uint8_t *pin_uv_auth_param)
+					      const uint8_t *pin_uv_auth_param,
+					      size_t pin_uv_auth_param_len)
 {
 	uint8_t padded_pin[FIDO2_PIN_PADDED_SIZE];
 	size_t padded_pin_len;
@@ -271,9 +296,8 @@ enum fido2_status fido2_clientpin_cmd_set_pin(uint8_t protocol, const uint8_t *p
 		return FIDO2_ERR_INVALID_PARAMETER;
 	}
 
-	ret = verify(shared_secret, new_pin_enc, new_pin_enc_len, pin_uv_auth_param,
-		     protocol == FIDO2_PIN_PROTOCOL_V1 ? FIDO2_PIN_AUTH_SIZE_P1
-						       : FIDO2_PIN_AUTH_SIZE_P2);
+	ret = verify(protocol, shared_secret, new_pin_enc, new_pin_enc_len, pin_uv_auth_param,
+		     pin_uv_auth_param_len);
 	if (ret) {
 		return FIDO2_ERR_PIN_AUTH_INVALID;
 	}
@@ -308,6 +332,138 @@ enum fido2_status fido2_clientpin_cmd_set_pin(uint8_t protocol, const uint8_t *p
 	if (ret) {
 		return FIDO2_ERR_OTHER;
 	}
+
+	return FIDO2_OK;
+}
+
+enum fido2_status fido2_clientpin_cmd_change_pin(uint8_t protocol, const uint8_t *platform_key,
+						 size_t platform_key_len,
+						 const uint8_t *pin_hash_enc,
+						 size_t pin_hash_enc_len,
+						 const uint8_t *new_pin_enc, size_t new_pin_enc_len,
+						 const uint8_t *pin_uv_auth_param,
+						 size_t pin_uv_auth_param_len)
+{
+	uint8_t pin_enc_w_hash_enc[FIDO2_PIN_ENC_MAX_SIZE + FIDO2_PIN_HASH_ENC_MAX_SIZE];
+	uint8_t pin_hash[FIDO2_PIN_HASH_SIZE];
+	size_t pin_hash_len;
+	uint8_t stored_pin_hash[FIDO2_PIN_HASH_SIZE];
+	uint8_t padded_pin[FIDO2_PIN_PADDED_SIZE];
+	size_t padded_pin_len;
+	size_t new_pin_len;
+	uint8_t new_pin_hash[FIDO2_SHA256_SIZE];
+	uint8_t retries;
+	int ret;
+
+	if (!fido2_clientpin_pin_is_set()) {
+		return FIDO2_ERR_PIN_AUTH_INVALID;
+	}
+
+	ret = fido2_storage_pin_retries_get(&retries);
+	if (ret) {
+		return FIDO2_ERR_OTHER;
+	}
+	if (retries == 0) {
+		return FIDO2_ERR_PIN_BLOCKED;
+	}
+
+	ret = decapsulate(platform_key, platform_key_len, protocol);
+	if (ret) {
+		return FIDO2_ERR_INVALID_PARAMETER;
+	}
+
+	if (new_pin_enc_len + pin_hash_enc_len > sizeof(pin_enc_w_hash_enc)) {
+		return FIDO2_ERR_INVALID_PARAMETER;
+	}
+	memcpy(pin_enc_w_hash_enc, new_pin_enc, new_pin_enc_len);
+	memcpy(pin_enc_w_hash_enc + new_pin_enc_len, pin_hash_enc, pin_hash_enc_len);
+
+	ret = verify(protocol, shared_secret, pin_enc_w_hash_enc,
+		     new_pin_enc_len + pin_hash_enc_len, pin_uv_auth_param, pin_uv_auth_param_len);
+	if (ret) {
+		return FIDO2_ERR_PIN_AUTH_INVALID;
+	}
+
+	ret = fido2_storage_pin_retries_decrement();
+	if (ret) {
+		return FIDO2_ERR_OTHER;
+	}
+
+	ret = decrypt(protocol, pin_hash_enc, pin_hash_enc_len, pin_hash, sizeof(pin_hash),
+		      &pin_hash_len);
+	if (ret) {
+		return FIDO2_ERR_PIN_AUTH_INVALID;
+	}
+
+	ret = fido2_storage_pin_get(stored_pin_hash);
+	if (ret) {
+		return FIDO2_ERR_OTHER;
+	}
+
+	if (pin_hash_len != FIDO2_PIN_HASH_SIZE ||
+	    memcmp(pin_hash, stored_pin_hash, FIDO2_PIN_HASH_SIZE) != 0) {
+		ret = generate_key_agreement();
+		if (ret) {
+			return FIDO2_ERR_OTHER;
+		}
+
+		ret = fido2_storage_pin_retries_get(&retries);
+		if (ret) {
+			return FIDO2_ERR_OTHER;
+		}
+
+		if (retries == 0) {
+			return FIDO2_ERR_PIN_BLOCKED;
+		}
+
+		++consecutive_pin_mismatches;
+		if (consecutive_pin_mismatches >= 3) {
+			return FIDO2_ERR_PIN_AUTH_BLOCKED;
+		}
+
+		return FIDO2_ERR_PIN_INVALID;
+	}
+
+	consecutive_pin_mismatches = 0;
+
+	ret = fido2_storage_pin_retries_reset();
+	if (ret) {
+		return FIDO2_ERR_OTHER;
+	}
+
+	ret = decrypt(protocol, new_pin_enc, new_pin_enc_len, padded_pin, sizeof(padded_pin),
+		      &padded_pin_len);
+	if (ret) {
+		return FIDO2_ERR_PIN_AUTH_INVALID;
+	}
+
+	if (padded_pin_len != FIDO2_PIN_PADDED_SIZE) {
+		return FIDO2_ERR_INVALID_PARAMETER;
+	}
+
+	/* Remove trailng 0s */
+	new_pin_len = strnlen((const char *)padded_pin, FIDO2_PIN_PADDED_SIZE);
+	if (new_pin_len < CONFIG_FIDO2_MIN_PIN_LENGTH) {
+		return FIDO2_ERR_PIN_POLICY_VIOLATION;
+	}
+
+	ret = fido2_crypto_sha256(padded_pin, new_pin_len, new_pin_hash);
+	if (ret) {
+		return FIDO2_ERR_OTHER;
+	}
+
+	ret = fido2_storage_pin_set(new_pin_hash);
+	if (ret) {
+		return FIDO2_ERR_OTHER;
+	}
+
+	/* Reset again because spec says so. */
+	ret = fido2_storage_pin_retries_reset();
+	if (ret) {
+		return FIDO2_ERR_OTHER;
+	}
+
+	reset_pin_uv_auth_token();
 
 	return FIDO2_OK;
 }

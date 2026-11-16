@@ -12,6 +12,7 @@
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/input/input.h>
 #include <zephyr/input/input_touch.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/minmax.h>
 #include <zephyr/pm/pm.h>
@@ -52,7 +53,7 @@ struct gt911_config {
 	/** I2C bus. */
 	struct i2c_dt_spec bus;
 	struct gpio_dt_spec rst_gpio;
-	/** Interrupt GPIO information. */
+	/** Interrupt GPIO information. Optional, port is NULL when absent. */
 	struct gpio_dt_spec int_gpio;
 	/* Alternate fallback I2C address */
 	uint8_t alt_addr;
@@ -91,6 +92,7 @@ struct gt911_data {
 #endif
 #ifdef CONFIG_PM
 	struct pm_notifier pm_notifier_handle;
+	atomic_t restore_gpio;
 #endif
 };
 
@@ -214,9 +216,47 @@ static int gt911_process(const struct device *dev)
 	return 0;
 }
 
+#if CONFIG_PM
+static int gt911_restore_gpio(const struct device *dev)
+{
+	const struct gt911_config *config = dev->config;
+	int r;
+
+	if (config->int_gpio.port == NULL) {
+		return 0;
+	}
+
+	/* The interrupt pin may lose its configuration in standby. */
+	r = gpio_pin_configure_dt(&config->int_gpio, GPIO_INPUT);
+	if (r < 0) {
+		LOG_ERR("Could not configure interrupt GPIO pin");
+		return r;
+	}
+
+#ifdef CONFIG_INPUT_GT911_INTERRUPT
+	r = gpio_pin_interrupt_configure_dt(&config->int_gpio, GPIO_INT_EDGE_TO_ACTIVE);
+	if (r < 0) {
+		LOG_ERR("Could not configure interrupt GPIO interrupt.");
+		return r;
+	}
+#endif
+
+	return 0;
+}
+#endif
+
 static void gt911_work_handler(struct k_work *work)
 {
 	struct gt911_data *data = CONTAINER_OF(work, struct gt911_data, work);
+
+#ifdef CONFIG_PM
+	if (atomic_cas(&data->restore_gpio, 1, 0)) {
+		if (gt911_restore_gpio(data->dev) != 0) {
+			atomic_set(&data->restore_gpio, 1);
+			return;
+		}
+	}
+#endif
 
 	gt911_process(data->dev);
 }
@@ -226,14 +266,14 @@ static void gt911_isr_handler(const struct device *dev, struct gpio_callback *cb
 {
 	struct gt911_data *data = CONTAINER_OF(cb, struct gt911_data, int_gpio_cb);
 
-	k_work_submit(&data->work);
+	input_work_submit(&data->work);
 }
 #else
 static void gt911_timer_handler(struct k_timer *timer)
 {
 	struct gt911_data *data = CONTAINER_OF(timer, struct gt911_data, timer);
 
-	k_work_submit(&data->work);
+	input_work_submit(&data->work);
 }
 #endif
 
@@ -259,30 +299,14 @@ static bool gt911_verify_firmware(const uint8_t *firmware)
 #if CONFIG_PM
 static void gt911_pm_state_exit(const struct device *dev, enum pm_state state)
 {
-	switch (state) {
-	case PM_STATE_STANDBY:
-		/* Reconfigure the GPIO interrupt pin on exit from
-		 * certain low power states as we might lose the GPIO state.
-		 */
-		const struct gt911_config *config = dev->config;
-		int r;
+	struct gt911_data *data = dev->data;
 
-		r = gpio_pin_configure_dt(&config->int_gpio, GPIO_INPUT);
-		if (r < 0) {
-			LOG_ERR("Could not configure interrupt GPIO pin");
-			return;
-		}
-
+	if (state == PM_STATE_STANDBY) {
+		/* GPIO expanders may sleep; defer access until the work queue runs. */
+		atomic_set(&data->restore_gpio, 1);
 #ifdef CONFIG_INPUT_GT911_INTERRUPT
-		r = gpio_pin_interrupt_configure_dt(&config->int_gpio, GPIO_INT_EDGE_TO_ACTIVE);
-		if (r < 0) {
-			LOG_ERR("Could not configure interrupt GPIO interrupt.");
-			return;
-		}
-#endif /* CONFIG_INPUT_GT911_INTERRUPT */
-		break;
-	default:
-		break;
+		k_work_submit(&data->work);
+#endif
 	}
 }
 #endif /* CONFIG_PM */
@@ -304,7 +328,7 @@ static int gt911_init(const struct device *dev)
 
 	int r;
 
-	if (!gpio_is_ready_dt(&config->int_gpio)) {
+	if (config->int_gpio.port != NULL && !gpio_is_ready_dt(&config->int_gpio)) {
 		LOG_ERR_DEVICE_NOT_READY(config->int_gpio.port);
 		return -ENODEV;
 	}
@@ -326,15 +350,17 @@ static int gt911_init(const struct device *dev)
 	 * We need to configure the int-pin to 0, in order to enter the
 	 * AddressMode0. Keeping the INT pin low during the reset sequence
 	 * should result in the device selecting an I2C address of 0x5D.
-	 * Note that if an alternate I2C address is set, we will probe
-	 * for the alternate address if 0x5D does not work. This is useful
-	 * for boards that do not route the INT pin, or only permit it
-	 * to be used as an input
+	 * A board that does not route the pin, or only permits it to be used
+	 * as an input, leaves the address to the strapping on the panel
+	 * instead, so alt-addr has to name the other one for the probing
+	 * below to find the device.
 	 */
-	r = gpio_pin_configure_dt(&config->int_gpio, GPIO_OUTPUT_INACTIVE);
-	if (r < 0) {
-		LOG_ERR("Could not configure int GPIO pin");
-		return r;
+	if (config->int_gpio.port != NULL) {
+		r = gpio_pin_configure_dt(&config->int_gpio, GPIO_OUTPUT_INACTIVE);
+		if (r < 0) {
+			LOG_ERR("Could not configure int GPIO pin");
+			return r;
+		}
 	}
 	/* Delay at least 10 ms after power on before we configure gt911 */
 	k_sleep(K_MSEC(20));
@@ -347,13 +373,15 @@ static int gt911_init(const struct device *dev)
 		/* hold down at least 5ms. This is the point the INT pin must be low. */
 		k_sleep(K_MSEC(5));
 	}
-	/* hold down 50ms to make sure the address available */
-	k_sleep(K_MSEC(50));
+	/* hold down 100ms to make sure the address available */
+	k_sleep(K_MSEC(100));
 
-	r = gpio_pin_configure_dt(&config->int_gpio, GPIO_INPUT);
-	if (r < 0) {
-		LOG_ERR("Could not configure interrupt GPIO pin");
-		return r;
+	if (config->int_gpio.port != NULL) {
+		r = gpio_pin_configure_dt(&config->int_gpio, GPIO_INPUT);
+		if (r < 0) {
+			LOG_ERR("Could not configure interrupt GPIO pin");
+			return r;
+		}
 	}
 
 #ifdef CONFIG_INPUT_GT911_INTERRUPT
@@ -474,11 +502,15 @@ static void gt911_##n##_pm_state_exit(enum pm_state state)                      
 #endif /* CONFIG_PM */
 
 #define GT911_INIT(index)                                                                          \
+	BUILD_ASSERT(!IS_ENABLED(CONFIG_INPUT_GT911_INTERRUPT) ||                                  \
+			     DT_INST_NODE_HAS_PROP(index, irq_gpios),                              \
+		     "CONFIG_INPUT_GT911_INTERRUPT applies to every GT911, so none of "            \
+		     "them may leave irq-gpios out");                                              \
 	static const struct gt911_config gt911_config_##index = {                                  \
 		.common = INPUT_TOUCH_DT_INST_COMMON_CONFIG_INIT(index),		           \
 		.bus = I2C_DT_SPEC_INST_GET(index),                                                \
 		.rst_gpio = GPIO_DT_SPEC_INST_GET_OR(index, reset_gpios, {0}),                     \
-		.int_gpio = GPIO_DT_SPEC_INST_GET(index, irq_gpios),                               \
+		.int_gpio = GPIO_DT_SPEC_INST_GET_OR(index, irq_gpios, {0}),                       \
 		.alt_addr = DT_INST_PROP_OR(index, alt_addr, 0),                                   \
 	};                                                                                         \
 	GT911_PM_NOTIFIER_FUNCS(index)                                                             \

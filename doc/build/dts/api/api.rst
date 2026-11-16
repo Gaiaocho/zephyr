@@ -487,7 +487,7 @@ device.
      - Sets UART device used by the :ref:`gdbstub` subsystem
    * - zephyr,hdlc-rcp-if
      - Selects the radio device used by the OpenThread HDLC RCP interface.
-       This device must have :c:struct:`hdlc_api` as its ``api``.
+       This device must have :c:struct:`hdlc_driver_api` as its ``api``.
    * - zephyr,host-cmd-espi-backend
      - Refer to :ref:`ec_host_cmd_backend_api` API documentation.
    * - zephyr,host-cmd-shi-backend
@@ -549,6 +549,8 @@ device.
        set the system time when :kconfig:option:`CONFIG_NET_CONFIG_CLOCK_SNTP_SET_RTC` is enabled)
    * - zephyr,rtk-serial
      - Selects the :ref:`uart_api` device used by the Serial GNSS RTK client.
+   * - zephyr,secure-storage-its-partition
+     - Fixed partition node. This selects the partition used by the Secure Storage ZMS backend.
    * - zephyr,sensor-clock
      - Selects the :ref:`counter_api` device used as sensor time source.
    * - zephyr,settings-partition

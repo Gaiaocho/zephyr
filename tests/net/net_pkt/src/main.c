@@ -56,7 +56,7 @@ int fake_dev_init(const struct device *dev)
 }
 
 #if defined(CONFIG_NET_L2_ETHERNET)
-static const struct ethernet_api fake_dev_api = {
+static DEVICE_API(ethernet, fake_dev_api) = {
 	.iface_api.init = fake_dev_iface_init,
 	.send = fake_dev_send,
 };
@@ -65,7 +65,7 @@ static const struct ethernet_api fake_dev_api = {
 #define _ETH_L2_CTX_TYPE NET_L2_GET_CTX_TYPE(ETHERNET_L2)
 #define L2_HDR_SIZE sizeof(struct net_eth_hdr)
 #else
-static const struct dummy_api fake_dev_api = {
+static DEVICE_API(dummy, fake_dev_api) = {
 	.iface_api.init = fake_dev_iface_init,
 	.send = fake_dev_send,
 };
@@ -782,6 +782,107 @@ ZTEST(net_pkt_test_suite, test_net_pkt_pull)
 	net_pkt_unref(dummy_pkt);
 }
 
+/* Three buffers: two full ones and a partial third */
+#define PULL_MID_TEST_PKT_DATA_SIZE ((2 * CONFIG_NET_BUF_DATA_SIZE) + 64)
+
+/* Pulling from a cursor inside the packet removes exactly the requested bytes
+ * at the cursor and keeps the data in front of it and after it, wherever the
+ * pulled range starts and ends relative to the buffer boundaries.
+ */
+ZTEST(net_pkt_test_suite, test_net_pkt_pull_from_cursor)
+{
+	static uint8_t pkt_data[PULL_MID_TEST_PKT_DATA_SIZE];
+	static uint8_t expected[PULL_MID_TEST_PKT_DATA_SIZE];
+	static uint8_t readback[PULL_MID_TEST_PKT_DATA_SIZE];
+	struct {
+		size_t skip;
+		size_t pull;
+	} cases[8];
+	struct net_pkt *pkt;
+	size_t total = sizeof(pkt_data);
+	size_t first_len;
+	size_t second_len;
+	size_t len;
+	size_t i;
+	int ret;
+
+	for (i = 0; i < total; i++) {
+		pkt_data[i] = (uint8_t)(i * 7U);
+	}
+
+	/* Find the buffer layout the allocator gives a packet of this size */
+	pkt = net_pkt_alloc_with_buffer(eth_if, total, NET_AF_UNSPEC, 0, K_NO_WAIT);
+	zassert_not_null(pkt, "Pkt not allocated");
+	zassert_ok(net_pkt_write(pkt, pkt_data, total), "Write packet failed");
+	zassert_not_null(pkt->buffer->frags, "Packet needs at least three buffers");
+	zassert_not_null(pkt->buffer->frags->frags, "Packet needs at least three buffers");
+	first_len = pkt->buffer->len;
+	second_len = pkt->buffer->frags->len;
+	net_pkt_unref(pkt);
+
+	zassert_true(first_len > 16U, "First buffer too short (%zu)", first_len);
+	zassert_true((first_len + second_len + 8U) < total, "Packet too short");
+
+	/* Inside the first buffer */
+	cases[0].skip = 8U;
+	cases[0].pull = 8U;
+	/* Up to the end of the first buffer */
+	cases[1].skip = first_len - 8U;
+	cases[1].pull = 8U;
+	/* Across the end of the first buffer */
+	cases[2].skip = first_len - 2U;
+	cases[2].pull = 8U;
+	/* The front of the second buffer */
+	cases[3].skip = first_len;
+	cases[3].pull = 8U;
+	/* All of the second buffer */
+	cases[4].skip = first_len;
+	cases[4].pull = second_len;
+	/* The tail of the first, all of the second and the front of the third */
+	cases[5].skip = first_len - 4U;
+	cases[5].pull = second_len + 8U;
+	/* From the front of the second buffer to the end of the packet */
+	cases[6].skip = first_len;
+	cases[6].pull = total - first_len;
+	/* From inside the first buffer to the end of the packet */
+	cases[7].skip = first_len - 4U;
+	cases[7].pull = total - first_len + 4U;
+
+	ARRAY_FOR_EACH(cases, c) {
+		size_t skip = cases[c].skip;
+		size_t pull = cases[c].pull;
+
+		memcpy(expected, pkt_data, skip);
+		memcpy(expected + skip, pkt_data + skip + pull, total - skip - pull);
+
+		pkt = net_pkt_alloc_with_buffer(eth_if, total, NET_AF_UNSPEC, 0, K_NO_WAIT);
+		zassert_not_null(pkt, "Pkt not allocated");
+		zassert_ok(net_pkt_write(pkt, pkt_data, total), "Write packet failed");
+
+		net_pkt_cursor_init(pkt);
+		net_pkt_set_overwrite(pkt, true);
+		zassert_ok(net_pkt_skip(pkt, skip), "Skip failed");
+
+		ret = net_pkt_pull(pkt, pull);
+		zexpect_ok(ret, "Pull of %zu at %zu failed (%d)", pull, skip, ret);
+
+		len = net_pkt_get_len(pkt);
+		zexpect_equal(len, total - pull, "Pull of %zu at %zu left %zu bytes", pull, skip,
+			      len);
+
+		/* Compare what is there, so a short packet fails on content too */
+		net_pkt_cursor_init(pkt);
+		memset(readback, 0, sizeof(readback));
+		len = MIN(len, total - pull);
+		ret = net_pkt_read(pkt, readback, len);
+		zexpect_ok(ret, "Read after pull of %zu at %zu failed", pull, skip);
+		zexpect_mem_equal(readback, expected, total - pull,
+				  "Pull of %zu at %zu changed other data", pull, skip);
+
+		net_pkt_unref(pkt);
+	}
+}
+
 ZTEST(net_pkt_test_suite, test_net_pkt_clone)
 {
 	uint8_t buf[26] = {"abcdefghijklmnopqrstuvwxyz"};
@@ -1285,6 +1386,296 @@ ZTEST(net_pkt_test_suite, test_net_pkt_shallow_clone_append_buf_1)
 ZTEST(net_pkt_test_suite, test_net_pkt_shallow_clone_append_buf_2)
 {
 	test_net_pkt_shallow_clone_append_buf(2);
+}
+
+/* Buffers held to keep the data pool empty while a blocking allocation runs. */
+static struct net_buf *pool_hog;
+
+static struct net_buf *drain_data_pool(struct net_buf_pool *pool)
+{
+	struct net_buf *head = NULL;
+	struct net_buf *buf;
+
+	while ((buf = net_buf_alloc_len(pool, CONFIG_NET_BUF_DATA_SIZE,
+					K_NO_WAIT)) != NULL) {
+		buf->frags = head;
+		head = buf;
+	}
+
+	return head;
+}
+
+static void release_pool_hog(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (pool_hog != NULL) {
+		net_buf_unref(pool_hog);
+		pool_hog = NULL;
+	}
+}
+
+static K_WORK_DELAYABLE_DEFINE(pool_hog_work, release_pool_hog);
+
+/* The allocator tries a non-blocking allocation before waiting. Check that a
+ * caller which asked to wait still waits, and still gets its buffers once they
+ * are returned to the pool.
+ */
+ZTEST(net_pkt_test_suite, test_net_pkt_alloc_buffer_blocking_succeeds)
+{
+	struct net_buf_pool *tx_data;
+	struct net_pkt *pkt;
+	int64_t start;
+
+	net_pkt_get_info(NULL, NULL, NULL, &tx_data);
+
+	pool_hog = drain_data_pool(tx_data);
+	zassert_not_null(pool_hog, "Data pool was already empty");
+	zassert_equal(atomic_get(&tx_data->avail_count), 0,
+		      "Data pool not drained");
+
+	k_work_schedule(&pool_hog_work, K_MSEC(50));
+
+	start = k_uptime_get();
+	pkt = net_pkt_alloc_with_buffer(NULL, CONFIG_NET_BUF_DATA_SIZE * 3,
+					NET_AF_UNSPEC, 0, K_MSEC(2000));
+
+	zassert_not_null(pkt, "Blocking allocation failed even though the "
+			      "buffers were returned to the pool");
+	zassert_true(k_uptime_get() - start >= 50,
+		     "Allocation returned without waiting");
+
+	net_pkt_unref(pkt);
+	release_pool_hog(NULL);
+}
+
+/* A caller that asked to wait for a given time must not wait appreciably
+ * longer. The upper bound is the point of this test: it fails if the deadline
+ * is ever restarted per fragment instead of being held across the chain.
+ */
+ZTEST(net_pkt_test_suite, test_net_pkt_alloc_buffer_blocking_times_out)
+{
+	struct net_buf_pool *tx_data;
+	struct net_pkt *pkt;
+	int64_t elapsed;
+
+	net_pkt_get_info(NULL, NULL, NULL, &tx_data);
+
+	pool_hog = drain_data_pool(tx_data);
+	zassert_not_null(pool_hog, "Data pool was already empty");
+
+	elapsed = k_uptime_get();
+	pkt = net_pkt_alloc_with_buffer(NULL, CONFIG_NET_BUF_DATA_SIZE * 3,
+					NET_AF_UNSPEC, 0, K_MSEC(100));
+	elapsed = k_uptime_get() - elapsed;
+
+	zassert_is_null(pkt, "Allocation succeeded with an empty pool");
+	zassert_true(elapsed >= 100, "Allocation gave up after %lld ms",
+		     elapsed);
+	zassert_true(elapsed < 300, "Allocation waited %lld ms for a 100 ms "
+		     "timeout", elapsed);
+
+	release_pool_hog(NULL);
+}
+
+/* Buffers handed back one at a time, so that a multi fragment allocation has
+ * to wait more than once.
+ */
+static struct net_buf *trickle_hog;
+
+static void trickle_release(struct k_work *work)
+{
+	struct net_buf *buf = trickle_hog;
+
+	if (buf == NULL) {
+		return;
+	}
+
+	trickle_hog = buf->frags;
+	buf->frags = NULL;
+	net_buf_unref(buf);
+
+	if (trickle_hog != NULL) {
+		k_work_reschedule(k_work_delayable_from_work(work), K_MSEC(60));
+	}
+}
+
+static K_WORK_DELAYABLE_DEFINE(trickle_work, trickle_release);
+
+/* The timeout is a budget for the whole allocation, not for each fragment of
+ * it. With one buffer coming back every 60 ms, a three fragment allocation
+ * given 100 ms must give up: it can only ever get the first fragment. If the
+ * deadline were restarted for each fragment it would instead collect all
+ * three and return after about 180 ms.
+ */
+ZTEST(net_pkt_test_suite, test_net_pkt_alloc_buffer_deadline_spans_chain)
+{
+	struct net_buf_pool *tx_data;
+	struct net_pkt *pkt;
+	int64_t elapsed;
+
+	net_pkt_get_info(NULL, NULL, NULL, &tx_data);
+
+	trickle_hog = drain_data_pool(tx_data);
+	zassert_not_null(trickle_hog, "Data pool was already empty");
+
+	k_work_schedule(&trickle_work, K_MSEC(60));
+
+	elapsed = k_uptime_get();
+	pkt = net_pkt_alloc_with_buffer(NULL, CONFIG_NET_BUF_DATA_SIZE * 3,
+					NET_AF_UNSPEC, 0, K_MSEC(100));
+	elapsed = k_uptime_get() - elapsed;
+
+	if (pkt != NULL) {
+		net_pkt_unref(pkt);
+	}
+
+	(void)k_work_cancel_delayable(&trickle_work);
+	if (trickle_hog != NULL) {
+		net_buf_unref(trickle_hog);
+		trickle_hog = NULL;
+	}
+
+	zassert_is_null(pkt, "Allocation collected every fragment in %lld ms "
+			"despite a 100 ms timeout, so the deadline is being "
+			"restarted per fragment", elapsed);
+	zassert_true(elapsed < 150, "Allocation waited %lld ms for a 100 ms "
+		     "timeout", elapsed);
+}
+
+/* When only part of the chain can be allocated the buffers taken so far must
+ * go back to the pool.
+ */
+ZTEST(net_pkt_test_suite, test_net_pkt_alloc_buffer_partial_chain)
+{
+	struct net_buf_pool *tx_data;
+	struct net_buf *spare;
+	struct net_pkt *pkt;
+
+	net_pkt_get_info(NULL, NULL, NULL, &tx_data);
+
+	pool_hog = drain_data_pool(tx_data);
+	zassert_not_null(pool_hog, "Data pool was already empty");
+
+	/* Hand one buffer back, so the first fragment succeeds and the
+	 * second one has to give up.
+	 */
+	spare = pool_hog;
+	pool_hog = spare->frags;
+	spare->frags = NULL;
+	net_buf_unref(spare);
+
+	zassert_equal(atomic_get(&tx_data->avail_count), 1,
+		      "Expected exactly one buffer to be available");
+
+	pkt = net_pkt_alloc_with_buffer(NULL, CONFIG_NET_BUF_DATA_SIZE * 3,
+					NET_AF_UNSPEC, 0, K_MSEC(100));
+
+	zassert_is_null(pkt, "Allocation succeeded without enough buffers");
+	zassert_equal(atomic_get(&tx_data->avail_count), 1,
+		      "Partially allocated chain was not returned to the pool");
+
+	release_pool_hog(NULL);
+}
+
+/* A non-blocking caller must still fail immediately on an empty pool, and must
+ * not leak the buffer it probed for.
+ */
+ZTEST(net_pkt_test_suite, test_net_pkt_alloc_buffer_nowait_exhausted)
+{
+	struct net_buf_pool *tx_data;
+	struct net_pkt *pkt;
+
+	net_pkt_get_info(NULL, NULL, NULL, &tx_data);
+
+	pool_hog = drain_data_pool(tx_data);
+	zassert_not_null(pool_hog, "Data pool was already empty");
+
+	pkt = net_pkt_alloc_with_buffer(NULL, CONFIG_NET_BUF_DATA_SIZE,
+					NET_AF_UNSPEC, 0, K_NO_WAIT);
+
+	zassert_is_null(pkt, "Allocation succeeded with an empty pool");
+	zassert_equal(atomic_get(&tx_data->avail_count), 0,
+		      "A failed allocation returned a buffer to the pool");
+
+	release_pool_hog(NULL);
+}
+
+ZTEST(net_pkt_test_suite, test_net_pkt_frag_double_free)
+{
+	struct net_buf_pool *tx_data;
+	struct net_buf *frag;
+	atomic_val_t avail;
+	uint8_t pool_id;
+	uint8_t user_data_size;
+
+	if (IS_ENABLED(CONFIG_ASSERT)) {
+		/* An assertion catches the double free before it returns */
+		ztest_test_skip();
+	}
+
+	net_pkt_get_info(NULL, NULL, NULL, &tx_data);
+
+	frag = net_pkt_get_reserve_tx_data(16, K_NO_WAIT);
+	zassert_not_null(frag, "Failed to get fragment");
+
+	pool_id = frag->pool_id;
+	user_data_size = frag->user_data_size;
+
+	net_pkt_frag_unref(frag);
+	zassert_equal(frag->ref, 0U, "Freed fragment has a reference");
+	avail = atomic_get(&tx_data->avail_count);
+
+	/* A second unref has to leave the freed fragment as it is */
+	net_pkt_frag_unref(frag);
+	zexpect_equal(atomic_get(&tx_data->avail_count), avail, "Fragment freed twice");
+	zexpect_equal(frag->ref, 0U, "Reference count changed to %u", frag->ref);
+	zexpect_equal(frag->flags, 0U, "Flags changed to 0x%02x", frag->flags);
+	zexpect_equal(frag->pool_id, pool_id, "Pool id changed from %u to %u", pool_id,
+		      frag->pool_id);
+	zexpect_equal(frag->user_data_size, user_data_size, "User data size changed from %u to %u",
+		      user_data_size, frag->user_data_size);
+}
+
+ZTEST(net_pkt_test_suite, test_net_pkt_frag_ref_saturated)
+{
+	struct net_buf_pool *tx_data;
+	struct net_buf *frag;
+	atomic_val_t avail;
+
+	if (IS_ENABLED(CONFIG_ASSERT)) {
+		/* An assertion catches the saturation before it returns */
+		ztest_test_skip();
+	}
+
+	net_pkt_get_info(NULL, NULL, NULL, &tx_data);
+
+	frag = net_pkt_get_reserve_tx_data(16, K_NO_WAIT);
+	zassert_not_null(frag, "Failed to get fragment");
+
+	/* One reference more than the count can hold */
+	for (size_t i = 0; i < UINT8_MAX; i++) {
+		zassert_equal_ptr(net_pkt_frag_ref(frag), frag);
+	}
+
+	avail = atomic_get(&tx_data->avail_count);
+
+	/* The count no longer tells when the last reference is dropped, so the
+	 * fragment is never freed.
+	 */
+	for (size_t i = 0; i <= UINT8_MAX; i++) {
+		net_pkt_frag_unref(frag);
+	}
+
+	zassert_equal(atomic_get(&tx_data->avail_count), avail,
+		      "Fragment freed with a saturated reference count");
+	zassert_equal(frag->ref, UINT8_MAX, "Reference count changed to %u", frag->ref);
+	zexpect_equal(frag->flags, 0U, "Flags changed to 0x%02x", frag->flags);
+
+	/* All references have been dropped: give the fragment back to its pool */
+	frag->ref = 1U;
+	net_pkt_frag_unref(frag);
+	zassert_equal(atomic_get(&tx_data->avail_count), avail + 1, "Fragment not freed");
 }
 
 ZTEST_SUITE(net_pkt_test_suite, NULL, NULL, NULL, NULL, NULL);

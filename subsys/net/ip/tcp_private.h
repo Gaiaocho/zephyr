@@ -5,7 +5,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "tp.h"
 #include <zephyr/toolchain/gcc.h>
 
 #define is(_a, _b) (strcmp((_a), (_b)) == 0)
@@ -36,28 +35,14 @@
 	_x;								\
 })
 
-#if defined(CONFIG_NET_TEST_PROTOCOL)
-#define tcp_malloc(_size) \
-	tp_malloc(_size, tp_basename(__FILE__), __LINE__, __func__)
-#define tcp_calloc(_nmemb, _size) \
-	tp_calloc(_nmemb, _size, tp_basename(__FILE__), __LINE__, __func__)
-#define tcp_free(_ptr) tp_free(_ptr, tp_basename(__FILE__), __LINE__, __func__)
-#else
 #define tcp_malloc(_size) k_malloc(_size)
 #define tcp_calloc(_nmemb, _size) k_calloc(_nmemb, _size)
 #define tcp_free(_ptr) k_free(_ptr)
-#endif
 
 #define TCP_PKT_ALLOC_TIMEOUT K_MSEC(CONFIG_NET_TCP_PKT_ALLOC_TIMEOUT)
 
-#if defined(CONFIG_NET_TEST_PROTOCOL)
-#define tcp_pkt_clone(_pkt) tp_pkt_clone(_pkt, tp_basename(__FILE__), __LINE__)
-#define tcp_pkt_unref(_pkt) tp_pkt_unref(_pkt, tp_basename(__FILE__), __LINE__)
-#else
 #define tcp_pkt_clone(_pkt) net_pkt_clone(_pkt, TCP_PKT_ALLOC_TIMEOUT)
 #define tcp_pkt_unref(_pkt) net_pkt_unref(_pkt)
-#define tp_pkt_alloc(args...)
-#endif
 
 #define tcp_pkt_ref(_pkt) net_pkt_ref(_pkt)
 /* The allocation includes a headroom estimate for the IP and TCP headers
@@ -74,8 +59,6 @@
 		net_context_get_family((_conn)->context),		\
 		NET_IPPROTO_TCP,					\
 		TCP_PKT_ALLOC_TIMEOUT);					\
-									\
-	tp_pkt_alloc(_pkt, tp_basename(__FILE__), __LINE__);		\
 									\
 	_pkt;								\
 })
@@ -95,8 +78,6 @@
 		_pkt = net_pkt_rx_alloc(TCP_PKT_ALLOC_TIMEOUT);		\
 	}								\
 									\
-	tp_pkt_alloc(_pkt, tp_basename(__FILE__), __LINE__);		\
-									\
 	_pkt;								\
 })
 
@@ -113,22 +94,11 @@
 		_pkt = net_pkt_alloc(TCP_PKT_ALLOC_TIMEOUT);		\
 	}								\
 									\
-	tp_pkt_alloc(_pkt, tp_basename(__FILE__), __LINE__);		\
-									\
 	_pkt;								\
 })
 
-#if defined(CONFIG_NET_TEST_PROTOCOL)
-#define conn_seq(_conn, _req) \
-	tp_seq_track(TP_SEQ, &(_conn)->seq, (_req), tp_basename(__FILE__), \
-			__LINE__, __func__)
-#define conn_ack(_conn, _req) \
-	tp_seq_track(TP_ACK, &(_conn)->ack, (_req), tp_basename(__FILE__), \
-			__LINE__, __func__)
-#else
 #define conn_seq(_conn, _req) (_conn)->seq += (_req)
 #define conn_ack(_conn, _req) (_conn)->ack += (_req)
-#endif
 
 #define NET_TCP_DEFAULT_MSS 536
 
@@ -148,7 +118,7 @@
 #define conn_send_data_dump(_conn)                                             \
 	({                                                                     \
 		NET_DBG("[%p] total=%zd, unacked_len=%d, "		       \
-			"send_win=%hu, mss=%hu",                               \
+			"send_win=%u, mss=%hu",                                \
 			(_conn), net_pkt_get_len(&(_conn)->send_data),         \
 			_conn->unacked_len, _conn->send_win,                   \
 			(uint16_t)conn_mss((_conn)));                          \
@@ -229,6 +199,12 @@ union tcp_endpoint {
 #define NET_TCP_NOP_OPT          1
 #define NET_TCP_MSS_OPT          2
 #define NET_TCP_WINDOW_SCALE_OPT 3
+#define NET_TCP_SACK_PERM_OPT    4
+#define NET_TCP_SACK_OPT         5
+
+/* SACK permitted, and one block: kind, len, left edge, right edge. */
+#define NET_TCP_SACK_PERM_SIZE   2
+#define NET_TCP_SACK_BLOCK_SIZE  8
 
 /* TCP Option sizes */
 #define NET_TCP_END_SIZE          1
@@ -236,19 +212,29 @@ union tcp_endpoint {
 #define NET_TCP_MSS_SIZE          4
 #define NET_TCP_WINDOW_SCALE_SIZE 3
 
+/* Largest window scale shift count, RFC 7323 section 2.3 */
+#define NET_TCP_MAX_WINDOW_SHIFT 14U
+
+/* Largest send or receive window this TCP can use */
+#define NET_TCP_MAX_WINDOW						\
+	(IS_ENABLED(CONFIG_NET_TCP_WINDOW_SCALE) ?			\
+	 ((uint32_t)UINT16_MAX << NET_TCP_MAX_WINDOW_SHIFT) :		\
+	 (uint32_t)UINT16_MAX)
+
 struct tcp_options {
 	uint16_t mss;
-	uint16_t window;
+	uint8_t wnd_shift;
 	bool mss_found : 1;
 	bool wnd_found : 1;
+	bool sack_perm_found : 1;
 };
 
 #ifdef CONFIG_NET_TCP_CONGESTION_AVOIDANCE
 
 struct tcp_collision_avoidance_reno {
-	uint16_t cwnd;
-	uint16_t ssthresh;
-	uint16_t pending_fast_retransmit_bytes;
+	uint32_t cwnd;
+	uint32_t ssthresh;
+	uint32_t pending_fast_retransmit_bytes;
 };
 #endif
 
@@ -329,12 +315,22 @@ struct tcp { /* TCP connection */
 	uint32_t keep_cnt;
 	uint32_t keep_cur;
 #endif /* CONFIG_NET_TCP_KEEPALIVE */
-	uint16_t recv_win_sent;
-	uint16_t recv_win_max;
-	uint16_t recv_win;
+	uint32_t recv_win_sent;
+	uint32_t recv_win_max;
+	uint32_t recv_win;
+	uint32_t send_win_max;
+	uint32_t send_win;
+	/* Right edge of the receive window last advertised, used when the
+	 * receive window is scaled.
+	 */
+	uint32_t recv_adv_edge;
 	uint16_t recv_since_ack;
-	uint16_t send_win_max;
-	uint16_t send_win;
+	/* Window scale shift counts: send applies to the peer's window,
+	 * recv to the window we advertise (Snd.Wind.Shift and Rcv.Wind.Shift
+	 * of RFC 7323).
+	 */
+	uint8_t send_win_shift;
+	uint8_t recv_win_shift;
 #ifdef CONFIG_NET_TCP_RANDOMIZED_RTO
 	uint16_t rto;
 #endif
@@ -347,6 +343,7 @@ struct tcp { /* TCP connection */
 #endif
 	uint8_t zwp_retries;
 	bool in_connect : 1;
+	bool connect_done : 1;
 	bool in_close : 1;
 #if defined(CONFIG_NET_TCP_KEEPALIVE)
 	bool keep_alive : 1;
@@ -354,6 +351,10 @@ struct tcp { /* TCP connection */
 	bool tcp_nodelay : 1;
 	bool addr_ref_done : 1;
 	bool rst_received : 1;
+	/* Both ends offered SACK during the handshake. */
+	bool sack_perm : 1;
+	/* Both ends offered window scaling during the handshake. */
+	bool win_scale : 1;
 };
 
 #define _flags(_fl, _op, _mask, _cond)					\

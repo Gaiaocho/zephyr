@@ -256,7 +256,6 @@ static void nrf5_get_capabilities_at_boot(void)
 		IEEE802154_HW_ENERGY_SCAN |
 		((caps & NRF_802154_CAPABILITY_DELAYED_TX) ? IEEE802154_HW_TXTIME : 0UL) |
 		((caps & NRF_802154_CAPABILITY_DELAYED_RX) ? IEEE802154_HW_RXTIME : 0UL) |
-		IEEE802154_HW_SLEEP_TO_TX |
 		IEEE802154_RX_ON_WHEN_IDLE |
 		((caps & NRF_802154_CAPABILITY_SECURITY) ? IEEE802154_HW_TX_SEC : 0UL)
 #if defined(CONFIG_IEEE802154_NRF5_MULTIPLE_CCA)
@@ -1294,7 +1293,7 @@ static const struct nrf5_802154_config nrf5_radio_cfg = {
 	.irq_config_func = nrf5_irq_config,
 };
 
-static const struct ieee802154_radio_api nrf5_radio_api = {
+static DEVICE_API(ieee802154_radio, nrf5_radio_api) = {
 	.iface_api.init = nrf5_iface_init,
 
 	.get_capabilities = nrf5_get_capabilities,

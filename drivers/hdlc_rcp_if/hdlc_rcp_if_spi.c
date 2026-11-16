@@ -505,7 +505,7 @@ static int hdlc_deferred_init(void)
 }
 #endif /* CONFIG_HDLC_RCP_IF_SPI_DEFERRED_INIT */
 
-static const struct hdlc_api spi_hdlc_api = {
+static DEVICE_API(hdlc, spi_hdlc_api) = {
 	.iface_api.init = hdlc_iface_init,
 	.register_rx_cb = hdlc_register_rx_cb,
 	.send = hdlc_send,
@@ -520,7 +520,7 @@ static const struct hdlc_api spi_hdlc_api = {
 #define MTU 1280
 
 static const struct hdlc_rcp_if_spi_config ot_hdlc_rcp_cfg = {
-	.bus = SPI_DT_SPEC_INST_GET(0, SPI_OP_MODE_MASTER | SPI_WORD_SET(8)),
+	.bus = SPI_DT_SPEC_INST_GET(0, SPI_OP_MODE_CONTROLLER | SPI_WORD_SET(8)),
 	.int_gpio = GPIO_DT_SPEC_INST_GET(0, int_gpios),
 	.rst_gpio = GPIO_DT_SPEC_INST_GET_OR(0, reset_gpios, {}),
 	.reset_time = DT_INST_PROP(0, reset_assert_time),

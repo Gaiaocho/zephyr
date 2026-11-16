@@ -47,10 +47,10 @@ int hl78xx_band_cfg(struct hl78xx_data *data, bool *modem_require_restart,
 
 int hl78xx_gsm_pdp_activate(struct hl78xx_data *data);
 
-#ifdef CONFIG_MODEM_HL78XX_RAT_NBNTN
+#ifdef CONFIG_MODEM_HL78XX_NTN_SUPPORT
 int hl78xx_rat_ntn_cfg(struct hl78xx_data *data, bool *modem_require_restart,
 		       enum hl78xx_cell_rat_mode rat_config_request);
-#endif /* CONFIG_MODEM_HL78XX_RAT_NBNTN */
+#endif /* CONFIG_MODEM_HL78XX_NTN_SUPPORT */
 int hl78xx_set_apn_internal(struct hl78xx_data *data, const char *apn, uint16_t size);
 
 int hl78xx_get_uart_config(struct hl78xx_data *data);
@@ -122,6 +122,16 @@ int hl78xx_band_bitmap_to_number(const char *bmp);
 int configure_uart_for_auto_baudrate(struct hl78xx_data *data, uint32_t baudrate);
 int hl78xx_try_baudrate(struct hl78xx_data *data, uint32_t baudrate);
 int hl78xx_detect_current_baudrate(struct hl78xx_data *data);
+/**
+ * @brief Move the modem and the UART to @p target_baudrate.
+ *
+ * @retval 0 Switched, and saved to the modem's non-volatile memory where
+ *           CONFIG_MODEM_HL78XX_AUTOBAUD_CHANGE_PERSISTENT asks for it.
+ * @retval 0 Already at that rate.
+ * @retval 1 Switched, but the save failed: the modem reverts to its saved
+ *           rate at its next reset.
+ * @retval <0 The switch failed.
+ */
 int hl78xx_switch_baudrate(struct hl78xx_data *data, uint32_t target_baudrate);
 #endif /* CONFIG_MODEM_HL78XX_AUTO_BAUDRATE */
 
@@ -225,5 +235,20 @@ int hl78xx_recover_kbndcfg(struct hl78xx_data *data, const struct hl78xx_script_
  */
 int hl78xx_recover_post_restart_timeout(struct hl78xx_data *data,
 					const struct hl78xx_script_failure *failure);
+
+/**
+ * @brief Recover an init script whose command went unanswered by retrying it.
+ *
+ * Pure retry: performs no repair of its own and always succeeds, so the rule's
+ * resume_state re-runs the init script. Pair with a bounded max_attempts —
+ * exhaustion falls back to the reset pulse.
+ *
+ * @param data HL78xx driver data.
+ * @param failure Original script failure context.
+ *
+ * @retval 0 always.
+ */
+int hl78xx_recover_init_script_retry(struct hl78xx_data *data,
+				     const struct hl78xx_script_failure *failure);
 
 #endif /* ZEPHYR_DRIVERS_MODEM_HL78XX_HL78XX_CFG_H_ */

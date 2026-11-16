@@ -182,7 +182,7 @@ uint32_t z_check_thread_stack_fail(const uint32_t fault_addr, const uint32_t psp
  *
  * @brief Dump MemManage fault information
  *
- * See z_arm_fault_dump() for example.
+ * See z_arm_fault() for example.
  *
  * @return error code to identify the fatal error reason
  */
@@ -337,7 +337,7 @@ static uint32_t mem_manage_fault(struct arch_esf *esf, int from_hard_fault, bool
  *
  * @brief Dump BusFault information
  *
- * See z_arm_fault_dump() for example.
+ * See z_arm_fault() for example.
  *
  * @return error code to identify the fatal error reason.
  *
@@ -494,7 +494,7 @@ static int bus_fault(struct arch_esf *esf, int from_hard_fault, bool *recoverabl
  *
  * @brief Dump UsageFault information
  *
- * See z_arm_fault_dump() for example.
+ * See z_arm_fault() for example.
  *
  * @return error code to identify the fatal error reason
  */
@@ -557,7 +557,7 @@ static uint32_t usage_fault(const struct arch_esf *esf)
  *
  * @brief Dump SecureFault information
  *
- * See z_arm_fault_dump() for example.
+ * See z_arm_fault() for example.
  *
  * @return error code to identify the fatal error reason
  */
@@ -616,7 +616,7 @@ static uint32_t secure_fault(const struct arch_esf *esf, bool non_secure_esf)
  *
  * @brief Dump debug monitor exception information
  *
- * See z_arm_fault_dump() for example.
+ * See z_arm_fault() for example.
  *
  */
 static void debug_monitor(struct arch_esf *esf, bool *recoverable)
@@ -715,7 +715,7 @@ static inline bool z_arm_is_pc_valid(uintptr_t pc)
  *
  * @brief Dump hard fault information
  *
- * See z_arm_fault_dump() for example.
+ * See z_arm_fault() for example.
  *
  * @return error code to identify the fatal error reason
  */
@@ -785,7 +785,7 @@ static uint32_t hard_fault(struct arch_esf *esf, bool *recoverable, bool non_sec
  *
  * @brief Dump reserved exception information
  *
- * See z_arm_fault_dump() for example.
+ * See z_arm_fault() for example.
  *
  */
 static void reserved_exception(const struct arch_esf *esf, int fault)
@@ -1136,6 +1136,30 @@ void z_arm_fault(uint32_t msp, uint32_t psp, uint32_t exc_return, _callee_saved_
 		return;
 	}
 
+#if defined(CONFIG_EXTRA_EXCEPTION_INFO) && defined(CONFIG_ARMV7_M_ARMV8_M_MAINLINE)
+	SCB_Type *scb_ptr;
+
+#if defined(CONFIG_ARM_SECURE_FIRMWARE)
+	scb_ptr = context.non_secure_esf ? SCB_NS : SCB;
+#else /* !CONFIG_ARM_SECURE_FIRMWARE */
+	scb_ptr = SCB;
+#endif /* CONFIG_ARM_SECURE_FIRMWARE */
+
+	/* Snapshot system control registers inspected and/or modified
+	 * during fault handling before fault handling is performed.
+	 */
+	esf_copy.extra_info.cfsr = scb_ptr->CFSR;
+	esf_copy.extra_info.hfsr = scb_ptr->HFSR;
+	esf_copy.extra_info.dfsr = scb_ptr->DFSR;
+	esf_copy.extra_info.mmfar = scb_ptr->MMFAR;
+	esf_copy.extra_info.bfar = scb_ptr->BFAR;
+#if defined(CONFIG_ARM_SECURE_FIRMWARE)
+	esf_copy.extra_info.sfsr = SAU->SFSR;
+	esf_copy.extra_info.sfar = SAU->SFAR;
+	esf_copy.extra_info.non_secure = context.non_secure_esf;
+#endif /* CONFIG_ARM_SECURE_FIRMWARE */
+#endif /* CONFIG_EXTRA_EXCEPTION_INFO && CONFIG_ARMV7_M_ARMV8_M_MAINLINE */
+
 	z_arm_set_fault_sp(esf, exc_return);
 
 	reason = fault_handle(esf, fault, &recoverable, context.non_secure_esf);
@@ -1178,8 +1202,9 @@ void z_arm_fault(uint32_t msp, uint32_t psp, uint32_t exc_return, _callee_saved_
 	 * so we only copy the fields before those.
 	 */
 	memcpy(&esf_copy, esf, offsetof(struct arch_esf, extra_info));
-	esf_copy.extra_info = (struct __extra_esf_info){
-		.callee = fault_callee_regs, .exc_return = exc_return, .msp = msp};
+	esf_copy.extra_info.callee = fault_callee_regs;
+	esf_copy.extra_info.exc_return = exc_return;
+	esf_copy.extra_info.msp = msp;
 #endif /* CONFIG_EXTRA_EXCEPTION_INFO */
 
 	/* Overwrite stacked IPSR to mark a nested exception,
@@ -1211,9 +1236,9 @@ void z_arm_fault(uint32_t msp, uint32_t psp, uint32_t exc_return, _callee_saved_
 #if defined(CONFIG_BUILTIN_STACK_GUARD)
 	uint32_t psplim, psp2;
 
-	__asm__ volatile("mrs %0, psplim" : "=r"(psplim));
+	psplim = __get_PSPLIM();
 	psp2 = MAX(psplim + arm_m_switch_stack_buffer, psp);
-	__asm__ volatile("msr psp, %0" ::"r"(psp2));
+	__set_PSP(psp2);
 #endif
 
 	/* Prepare interrupt exit for context switch, but only if this

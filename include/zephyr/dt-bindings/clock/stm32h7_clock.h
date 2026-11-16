@@ -6,7 +6,7 @@
 #ifndef ZEPHYR_INCLUDE_DT_BINDINGS_CLOCK_STM32H7_CLOCK_H_
 #define ZEPHYR_INCLUDE_DT_BINDINGS_CLOCK_STM32H7_CLOCK_H_
 
-#include "stm32_common_clocks.h"
+#include <zephyr/dt-bindings/clock/stm32_common_clocks.h>
 
 /** @cond INTERNAL_HIDDEN */
 
@@ -38,10 +38,14 @@
 /** Bus clocks */
 #define STM32_SRC_TIMPCLK1	(STM32_SRC_CKPER + 1)
 #define STM32_SRC_TIMPCLK2	(STM32_SRC_TIMPCLK1 + 1)
+#define STM32_SRC_PCLK1		(STM32_SRC_TIMPCLK2 + 1)
+#define STM32_SRC_PCLK2		(STM32_SRC_PCLK1 + 1)
+#define STM32_SRC_PCLK4		(STM32_SRC_PCLK2 + 1)
+#define STM32_SRC_HCLK3		(STM32_SRC_PCLK4 + 1)
+#define STM32_SRC_PCLK3		(STM32_SRC_HCLK3 + 1)
 /** Others: Not yet supported */
 /* #define STM32_SRC_I2SCKIN	TBD */
 /* #define STM32_SRC_SPDIFRX	TBD */
-
 
 /** Bus clocks */
 #define STM32_CLOCK_BUS_AHB3    0x0D4
@@ -53,12 +57,6 @@
 #define STM32_CLOCK_BUS_APB1_2  0x0EC
 #define STM32_CLOCK_BUS_APB2    0x0F0
 #define STM32_CLOCK_BUS_APB4    0x0F4
-/** Alias D1/2/3 domains clocks */ /* TBD: To remove ? */
-#define STM32_SRC_PCLK1		STM32_CLOCK_BUS_APB1
-#define STM32_SRC_PCLK2		STM32_CLOCK_BUS_APB2
-#define STM32_SRC_HCLK3		STM32_CLOCK_BUS_AHB3
-#define STM32_SRC_PCLK3		STM32_CLOCK_BUS_APB3
-#define STM32_SRC_PCLK4		STM32_CLOCK_BUS_APB4
 
 #define STM32_PERIPH_BUS_MIN	STM32_CLOCK_BUS_AHB3
 #define STM32_PERIPH_BUS_MAX	STM32_CLOCK_BUS_APB4

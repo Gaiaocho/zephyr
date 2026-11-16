@@ -1,6 +1,6 @@
 /*
- * SPDX-FileCopyrightText: <text>Copyright (c) 2026 Infineon Technologies AG,
- * or an affiliate of Infineon Technologies AG. All rights reserved.</text>
+ * SPDX-FileCopyrightText: Copyright (c) 2026 Infineon Technologies AG,
+ * SPDX-FileCopyrightText: or an affiliate of Infineon Technologies AG. All rights reserved.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -38,7 +38,9 @@ struct fixed_rate_clock_config {
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(dpll_hp)) ||                                              \
 	DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(dpll_lp0)) ||                                         \
-	DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(dpll_lp1))
+	DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(dpll_lp1)) ||                                         \
+	(DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(clk_wco)) &&                                         \
+	 !IS_ENABLED(CONFIG_SOC_FAMILY_INFINEON_PSOC4))
 static void clock_startup_error(uint32_t error)
 {
 	(void)error; /* Suppress the compiler warning */
@@ -170,7 +172,9 @@ static int fixed_rate_clk_init(const struct device *dev)
 		/* "touch" err to avoid a warning with asserts turned off */
 		ARG_UNUSED(err);
 		__ASSERT(err == CY_SYSCLK_SUCCESS, "Invalid clock selection");
+#if defined(CONFIG_INFINEON_SYSCLK_LOCK_NONE)
 		Cy_SysClk_ImoLock(CY_SYSCLK_IMO_LOCK_NONE);
+#endif
 		SystemCoreClockUpdate();
 #endif
 		break;
@@ -186,7 +190,14 @@ static int fixed_rate_clk_init(const struct device *dev)
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(clk_ilo))
 	case IFX_ILO:
+#if defined(CONFIG_SOC_SERIES_PSOC4HVMS128K) || defined(CONFIG_SOC_SERIES_PSOC4HVMS64K)
+		/* HVMS/PA requires the WDT unlocked while the ILO is enabled. */
+		Cy_WDT_Unlock();
 		Cy_SysClk_IloEnable();
+		Cy_WDT_Lock();
+#else
+		Cy_SysClk_IloEnable();
+#endif
 		break;
 #endif
 
@@ -204,7 +215,21 @@ static int fixed_rate_clk_init(const struct device *dev)
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(clk_pilo))
 	case IFX_PILO:
+#if defined(CONFIG_SOC_SERIES_PSOC4HVMS128K) || defined(CONFIG_SOC_SERIES_PSOC4HVMS64K)
+		/* PILO enable requires the WDT unlocked. */
+		Cy_WDT_Unlock();
 		Cy_SysClk_PiloEnable();
+		Cy_WDT_Lock();
+#else
+		Cy_SysClk_PiloEnable();
+#endif
+		break;
+#endif
+
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(clk_hposc)) &&                                            \
+	(defined(CONFIG_SOC_SERIES_PSOC4HVMS128K) || defined(CONFIG_SOC_SERIES_PSOC4HVMS64K))
+	case IFX_HPOSC:
+		Cy_SysClk_HposcEnable();
 		break;
 #endif
 

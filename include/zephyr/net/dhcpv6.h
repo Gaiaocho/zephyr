@@ -75,7 +75,7 @@ struct net_dhcpv6_params {
 	uint8_t downstream_count;
 	/** Optional downstream interface indices. When a prefix is delegated
 	 *  (request_prefix), each listed interface is turned into a downstream
-	 *  link of a requesting router (RFC 8415): it is assigned a distinct
+	 *  link of a requesting router (@rfc{8415}): it is assigned a distinct
 	 *  /64 carved from the delegated prefix (the Nth entry gets the Nth
 	 *  /64), which is then advertised via Router Advertisements. Requires
 	 *  @kconfig{CONFIG_NET_IPV6_ND_RA_TX}. A @ref downstream_count of 0 means the
@@ -97,6 +97,9 @@ struct net_dhcpv6_params {
  *  Once the negotiation is complete, IPv6 address/prefix details will be added
  *  to the interface.
  *
+ *  If the client was started automatically by a Router Advertisement
+ *  (@kconfig{CONFIG_NET_DHCPV6_START_ON_RA}), it is restarted with @p params.
+ *
  *  @param iface A valid pointer to a network interface
  *  @param params DHCPv6 client configuration parameters.
  */
@@ -108,6 +111,9 @@ void net_dhcpv6_start(struct net_if *iface, struct net_dhcpv6_params *params);
  *  @details Stop DHCPv6 client on a given interface. DHCPv6 client
  *  will remove all configuration obtained from a DHCP server from the
  *  interface and stop any further negotiation with the server.
+ *  The client is not started automatically by Router Advertisements
+ *  (@kconfig{CONFIG_NET_DHCPV6_START_ON_RA}) on the interface until
+ *  DHCPv6 is started again with net_dhcpv6_start().
  *
  *  @param iface A valid pointer to a network interface
  */

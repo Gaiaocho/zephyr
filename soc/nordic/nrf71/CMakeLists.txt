@@ -2,11 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 zephyr_library_sources(soc.c)
+zephyr_library_sources_ifdef(CONFIG_SOC_SERIES_NRF71_READ_ICR nrf71_icr.c)
 
 if(CONFIG_BUILD_WITH_TFM)
   set_property(TARGET zephyr_property_target APPEND PROPERTY TFM_CMAKE_OPTIONS
     -DZEPHYR_BASE=${ZEPHYR_BASE}
   )
+endif()
+
+# APPROTECT setup requires secure peripheral access.
+# For TF-M builds, approtect_setup.c is compiled into the secure image.
+# from modules/trusted-firmware-m/nordic/nrf7120_cpuapp/CMakeLists.txt.
+if(CONFIG_SOC_NRF7120_APPROTECT_BOOT_WORKAROUND AND NOT CONFIG_BUILD_WITH_TFM)
+  zephyr_library_sources(approtect_setup.c)
 endif()
 
 # WICR programming requires MRAMC (secure-only peripheral).

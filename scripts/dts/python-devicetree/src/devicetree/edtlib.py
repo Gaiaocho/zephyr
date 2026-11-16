@@ -1,6 +1,7 @@
 # Copyright (c) 2019 Nordic Semiconductor ASA
 # Copyright (c) 2019 Linaro Limited
 # Copyright 2025 NXP
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
 
 # Tip: You can view just the documentation with 'pydoc3 devicetree.edtlib'
@@ -198,6 +199,11 @@ class Binding:
       for example, ["i2c"] or ["i3c", "i2c"]. Or an empty list if there is
       no 'bus:' in this binding.
 
+    classes:
+      A list of the device class names declared by the binding's 'class:'
+      key, or an empty list if there is no 'class:'. 'class:' values from
+      included bindings are unioned into this list.
+
     on_bus:
       If nodes with this binding's 'compatible' appear on a bus, a string
       describing the bus type (like "i2c"). None otherwise.
@@ -344,6 +350,14 @@ class Binding:
             return []
 
     @property
+    def classes(self) -> list[str]:
+        "See the class docstring"
+        if self.raw.get('class') is not None:
+            return self._classes
+        else:
+            return []
+
+    @property
     def on_bus(self) -> Optional[str]:
         "See the class docstring"
         return self.raw.get('on-bus')
@@ -472,7 +486,8 @@ class Binding:
         # Allowed top-level keys. The 'include' key should have been
         # removed by _load_raw() already.
         ok_top = {"title", "description", "compatible", "bus",
-                  "on-bus", "properties", "child-binding", "examples"}
+                  "on-bus", "class", "properties", "child-binding",
+                  "examples"}
 
         # Descriptive errors for legacy bindings.
         legacy_errors = {
@@ -510,6 +525,27 @@ class Binding:
             and not isinstance(raw["on-bus"], str)):
             _err(f"malformed 'on-bus:' value in {self.path}, "
                  "expected string")
+
+        if "class" in raw:
+            cls = raw["class"]
+            if isinstance(cls, str):
+                classes = [cls]
+            elif (isinstance(cls, list)
+                  and all(isinstance(elem, str) for elem in cls)):
+                classes = cls
+            else:
+                _err(f"malformed 'class:' value in {self.path}, "
+                     "expected string or list of strings")
+            for elem in classes:
+                if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", elem):
+                    _err(f"malformed device class name '{elem}' in "
+                         f"{self.path}, expected lowercase letters, "
+                         "digits, '-' and '_', starting with a letter "
+                         "or digit")
+            if len(set(classes)) != len(classes):
+                _err(f"duplicate device class names in 'class:' in "
+                     f"{self.path}")
+            self._classes = classes
 
         self._check_properties()
 
@@ -1198,6 +1234,10 @@ class Node:
       returning the value of the first 'bus:' key found. If none of the node's
       parents has a 'bus:' key, this attribute is an empty list.
 
+    classes:
+      A list of the device class names declared by the node's binding
+      (including the binding's included files), or an empty list.
+
     on_bus:
       Resolved bus type for this node, or None if the node is not on a bus.
       If the binding sets 'on-bus', that value is validated against the parent
@@ -1255,6 +1295,7 @@ class Node:
         self.dep_ordinal: int = -1
         self.compats: list[str] = compats
         self.ranges: list[Range] = []
+        self.dma_ranges: list[Range] = []
         self.regs: list[Register] = []
         self.props: dict[str, Property] = {}
         self.interrupts: list[ControllerAndData] = []
@@ -1265,6 +1306,7 @@ class Node:
         self._init_binding()
         self._init_regs()
         self._init_ranges()
+        self._init_dma_ranges()
 
     @property
     def name(self) -> str:
@@ -1423,6 +1465,13 @@ class Node:
         "See the class docstring"
         bus_node = self.bus_node
         return bus_node.buses if bus_node else []
+
+    @property
+    def classes(self) -> list[str]:
+        "See the class docstring"
+        if self._binding:
+            return self._binding.classes
+        return []
 
     @property
     def on_bus(self) -> Optional[str]:
@@ -1708,8 +1757,15 @@ class Node:
                 self._binding = binding_from_parent
                 return
 
-        # No binding found
-        self._binding = None
+        # No binding found. For /cpus/cpu@N nodes without a compatible,
+        # fall back to the binding loaded from cpu.yaml (if available).
+        # This gives binding-less CPU nodes typed properties and a
+        # device_type default without requiring a compatible string.
+        # Nodes with a YAML binding return early above and never reach here.
+        if _is_cpu_node(self):
+            self._binding = self.edt._cpu_fallback_binding()
+        else:
+            self._binding = None
 
     def _binding_from_properties(self) -> None:
         # Sets up a Binding object synthesized from the properties in the node.
@@ -1873,7 +1929,7 @@ class Node:
         prop_min_len = prop_spec.min_len
         prop_max_len = prop_spec.max_len
         if prop_min_len is not None or prop_max_len is not None:
-            if isinstance(val, (list, bytes)):
+            if isinstance(val, list | bytes):
                 val_len = len(val)
                 if prop_min_len is not None and val_len < prop_min_len:
                     _err(f"value of property '{name}' on {self.path} in "
@@ -1980,6 +2036,16 @@ class Node:
         if prop_type == "int":
             return prop.to_num(signed_aware=True)
 
+        if prop_type == "var-uint64":
+            nums = prop.to_nums()
+            if len(nums) == 1:
+                return nums[0]
+            elif len(nums) == 2:
+                return (nums[0] << 32) | nums[1]
+            else:
+                _err(f"'{name}' in {node.path} has type 'var-uint64' but "
+                     f"{len(nums)} cells; expected 1 or 2")
+
         if prop_type == "array":
             return prop.to_nums(signed_aware=True)
 
@@ -2023,7 +2089,7 @@ class Node:
 
     def _check_undeclared_props(self) -> None:
         # Checks that all properties are declared in the binding
-        wl = {"compatible", "status", "ranges", "phandle",
+        wl = {"compatible", "status", "ranges", "dma-ranges", "phandle",
               "interrupt-parent", "interrupts-extended", "device_type"}
 
         for prop_name in self._node.props:
@@ -2100,6 +2166,67 @@ class Node:
                     raw_range[(4*child_address_cells + 4*parent_address_cells):])
 
             self.ranges.append(Range(self, child_bus_cells, child_bus_addr,
+                                     parent_bus_cells, parent_bus_addr,
+                                     length_cells, length))
+
+    def _init_dma_ranges(self) -> None:
+        # Initializes self.dma_ranges
+        node = self._node
+
+        self.dma_ranges = []
+
+        if "dma-ranges" not in node.props:
+            return
+
+        raw_child_address_cells = node.props.get("#address-cells")
+        parent_address_cells = _address_cells(node)
+        if raw_child_address_cells is None:
+            child_address_cells = 2  # Default value per DT spec.
+        else:
+            child_address_cells = raw_child_address_cells.to_num()
+        raw_child_size_cells = node.props.get("#size-cells")
+        if raw_child_size_cells is None:
+            child_size_cells = 1  # Default value per DT spec.
+        else:
+            child_size_cells = raw_child_size_cells.to_num()
+
+        entry_cells = child_address_cells + parent_address_cells + child_size_cells
+
+        if entry_cells == 0:
+            if len(node.props["dma-ranges"].value) == 0:
+                return
+            else:
+                _err(f"'dma-ranges' should be empty in {self._node.path} since "
+                     f"<#address-cells> = {child_address_cells}, "
+                     f"<#address-cells for parent> = {parent_address_cells} and "
+                     f"<#size-cells> = {child_size_cells}")
+
+        for raw_range in _slice(node, "dma-ranges", 4*entry_cells,
+                                f"4*(<#address-cells> (= {child_address_cells}) + "
+                                "<#address-cells for parent> "
+                                f"(= {parent_address_cells}) + "
+                                f"<#size-cells> (= {child_size_cells}))"):
+
+            child_bus_cells = child_address_cells
+            if child_address_cells == 0:
+                child_bus_addr = None
+            else:
+                child_bus_addr = to_num(raw_range[:4*child_address_cells])
+            parent_bus_cells = parent_address_cells
+            if parent_address_cells == 0:
+                parent_bus_addr = None
+            else:
+                parent_bus_addr = to_num(
+                    raw_range[(4*child_address_cells):
+                              (4*child_address_cells + 4*parent_address_cells)])
+            length_cells = child_size_cells
+            if child_size_cells == 0:
+                length = None
+            else:
+                length = to_num(
+                    raw_range[(4*child_address_cells + 4*parent_address_cells):])
+
+            self.dma_ranges.append(Range(self, child_bus_cells, child_bus_addr,
                                      parent_bus_cells, parent_bus_addr,
                                      length_cells, length))
 
@@ -2305,6 +2432,13 @@ class EDT:
     nodes:
       A list of Node objects for the nodes that appear in the devicetree
 
+    cpus:
+      A list of Node objects for the /cpus/cpu@N nodes, in DTS source order
+      (depth-first pre-order, matching logical CPU numbering). Children of
+      /cpus whose name-without-unit-address is not "cpu" (e.g. "power-states")
+      are excluded. Nodes appear regardless of whether they have a compatible
+      property.
+
     compat2nodes:
       A collections.defaultdict that maps each 'compatible' string that appears
       on some Node to a list of Nodes with that compatible.
@@ -2429,6 +2563,7 @@ class EDT:
 
         # Public attributes (the rest are properties)
         self.nodes: list[Node] = []
+        self.cpus: list[Node] = []
         self.compat2nodes: dict[str, list[Node]] = defaultdict(list)
         self.compat2okay: dict[str, list[Node]] = defaultdict(list)
         self.compat2notokay: dict[str, list[Node]] = defaultdict(list)
@@ -2457,6 +2592,10 @@ class EDT:
             for path in self._binding_paths
         }
         self._node2enode: dict[dtlib_Node, Node] = {}
+        # Lazily populated by _cpu_fallback_binding(). None until the first
+        # binding-less /cpus/cpu@N node is initialized, or None for the
+        # lifetime of this EDT if cpu.yaml is not in bindings_dirs.
+        self._cpu_binding: Optional[Binding] = None
 
         if dts is not None:
             try:
@@ -2464,6 +2603,39 @@ class EDT:
             except DTError as e:
                 raise EDTError(e) from e
             self._finish_init()
+
+    def _cpu_fallback_binding(self) -> Optional["Binding"]:
+        # Returns the Binding loaded from cpu.yaml, for use as a fallback on
+        # /cpus/cpu@N nodes that have no 'compatible' property.
+        #
+        # The result is cached in self._cpu_binding so cpu.yaml is parsed at
+        # most once per EDT instance, regardless of how many binding-less CPU
+        # nodes exist. Each EDT instance has its own cache, so two EDT objects
+        # with different bindings_dirs are fully independent.
+        #
+        # Returns None if cpu.yaml is not present in bindings_dirs (e.g. a
+        # minimal test-bindings directory), in which case binding-less CPU
+        # nodes receive no fallback binding.
+        if self._cpu_binding is not None:
+            return self._cpu_binding
+
+        cpu_yaml_path = self._binding_fname2path.get("cpu.yaml")
+        if cpu_yaml_path is None:
+            return None
+
+        self._cpu_binding = Binding(
+            cpu_yaml_path,
+            self._binding_fname2path,
+            require_compatible=False,
+            require_description=False,
+        )
+        return self._cpu_binding
+
+    def _werror_msg(self, msg: str) -> None:
+        if self._werror:
+            _err(msg)
+        else:
+            _LOG.warning(msg)
 
     def _finish_init(self) -> None:
         # This helper exists to make the __deepcopy__() implementation
@@ -2761,6 +2933,9 @@ class EDT:
             self.nodes.append(node)
             self._node2enode[dt_node] = node
 
+            if _is_cpu_node(node):
+                self.cpus.append(node)
+
         for node in self.nodes:
             # Initialize properties that may depend on other Node objects having
             # been created, because they (either always or sometimes) reference
@@ -2813,11 +2988,7 @@ class EDT:
                     # As an exception, the root node can have whatever
                     # compatibles it wants. Other nodes get checked.
                     elif node.path != '/':
-                        if self._werror:
-                            handler_fn: Any = _err
-                        else:
-                            handler_fn = _LOG.warning
-                        handler_fn(
+                        self._werror_msg(
                             f"node '{node.path}' compatible '{compat}' "
                             f"has unknown vendor prefix '{vendor}'")
 
@@ -2869,6 +3040,46 @@ class EDT:
             for compat in compatibles:
                 # This is also just for future-proofing.
                 assert isinstance(compat, str)
+
+        # CPU binding type-consistency check.
+        # Warn (or error with werror=True) when a vendor binding declares a
+        # cpu.yaml property with an incompatible type.  Nodes without a
+        # compatible used the cpu.yaml fallback directly; there is no vendor
+        # binding to blame, so they are skipped.
+        #
+        # Call _cpu_fallback_binding() explicitly here: if every CPU node has
+        # a compatible, the lazy accessor was never triggered during node init,
+        # so self._cpu_binding would still be None without this call.
+        cpu_binding = self._cpu_fallback_binding()
+        if cpu_binding is None:
+            return
+
+        for node in self.cpus:
+            if not node.compats:
+                # No compatible: node used the fallback binding. Nothing to
+                # compare against cpu.yaml.
+                continue
+
+            node_binding = node.binding
+            if node_binding is None:
+                continue
+
+            for prop_name, cpu_spec in cpu_binding.prop2specs.items():
+                if prop_name not in node_binding.prop2specs:
+                    continue
+
+                node_type = node_binding.prop2specs[prop_name].type
+                cpu_type = cpu_spec.type
+
+                if node_type == cpu_type:
+                    continue
+
+                msg = (
+                    f"CPU binding '{node_binding.path}' declares property "
+                    f"'{prop_name}' with type '{node_type}', but "
+                    f"cpu.yaml expects type '{cpu_type}'"
+                )
+                self._werror_msg(msg)
 
 
 def bindings_from_paths(yaml_paths: list[str],
@@ -3080,6 +3291,11 @@ def _merge_props(to_dict: dict,
     # If 'from_dict' and 'to_dict' contain a 'required:' key for the same
     # property, then the values are ORed together.
     #
+    # 'class:' values at a binding root (top level or a child-binding
+    # level) are unioned instead of overwritten, so that a binding which
+    # includes several class base bindings is a member of all of their
+    # classes.
+    #
     # If 'check_required' is True, then an error is raised if 'from_dict' has
     # 'required: true' while 'to_dict' has 'required: false'. This prevents
     # bindings from "downgrading" requirements from bindings they include,
@@ -3100,6 +3316,8 @@ def _merge_props(to_dict: dict,
                          check_required)
         elif prop not in to_dict:
             to_dict[prop] = from_dict[prop]
+        elif prop == "class" and parent in (None, "child-binding"):
+            to_dict[prop] = _merge_class(to_dict[prop], from_dict[prop])
         elif _bad_overwrite(to_dict, from_dict, prop, check_required):
             _err(f"'{binding_path}' (in '{parent}'): '{prop}' "
                  f"from included file overwritten ('{from_dict[prop]}' "
@@ -3114,6 +3332,18 @@ def _merge_props(to_dict: dict,
 
             # 'required: true' takes precedence
             to_dict["required"] = to_dict["required"] or from_dict["required"]
+
+
+def _merge_class(to_val: Union[str, list], from_val: Union[str, list]) -> list:
+    # _merge_props() helper. Returns the union of two top-level 'class:'
+    # values, each a string or a list of strings, preserving order and
+    # dropping duplicates. Values in 'to_val' come first.
+
+    res = list(to_val) if isinstance(to_val, list) else [to_val]
+    for elem in (from_val if isinstance(from_val, list) else [from_val]):
+        if elem not in res:
+            res.append(elem)
+    return res
 
 
 def _bad_overwrite(to_dict: dict, from_dict: dict, prop: str,
@@ -3177,7 +3407,7 @@ def _check_prop_by_type(prop_name: str,
         _err(f"missing 'type:' for '{prop_name}' in 'properties' in "
              f"'{binding_path}'")
 
-    ok_types = {"boolean", "int", "array", "uint8-array", "string",
+    ok_types = {"boolean", "int", "var-uint64", "array", "uint8-array", "string",
                 "string-array", "phandle", "phandles", "phandle-array",
                 "path", "compound"}
 
@@ -3199,23 +3429,23 @@ def _check_prop_by_type(prop_name: str,
 
     # If you change const_types, be sure to update the type annotation
     # for PropertySpec.const.
-    const_types = {"int", "array", "uint8-array", "string", "string-array"}
+    const_types = {"int", "var-uint64", "array", "uint8-array", "string", "string-array"}
     if const is not None:
         if prop_type not in const_types:
             _err(f"const in '{binding_path}' for property '{prop_name}' "
                  f"has type '{prop_type}', expected one of " +
                  ", ".join(const_types))
 
-        if prop_type in {"int", "array"}:
+        if prop_type in {"int", "var-uint64", "array"}:
             for subval in const if isinstance(const, list) else [const]:
                 if not _is_plain_int(subval):
                     _err(f"'const: {const}' for '{prop_name}' in "
                          f"'{binding_path}' is not an integer/array")
 
     if min_val is not None or max_val is not None:
-        if prop_type not in {"int", "array"}:
+        if prop_type not in {"int", "var-uint64", "array"}:
             _err(f"'min:'/'max:' in '{binding_path}' for '{prop_name}' "
-                 "requires 'type: int' or 'type: array', "
+                 "requires 'type: int', 'type: var-uint64', or 'type: array', "
                  f"but has type '{prop_type}'")
 
         if "enum" in options:
@@ -3297,6 +3527,7 @@ def _check_prop_by_type(prop_name: str,
         # PropertySpec.default.
 
         if (prop_type == "int" and _is_plain_int(default)
+            or prop_type == "var-uint64" and _is_plain_int(default)
             or prop_type == "string" and isinstance(default, str)):
             return True
 
@@ -3936,8 +4167,7 @@ _BindingLoader.add_constructor("!include", _binding_include)
 # "Default" binding for properties which are defined by the spec.
 #
 # Zephyr: do not change the _DEFAULT_PROP_TYPES keys without
-# updating the documentation for the DT_PROP() macro in
-# include/devicetree.h.
+# updating the documentation for the DT_PROP() macro.
 #
 
 _DEFAULT_PROP_TYPES: dict[str, str] = {
@@ -3982,3 +4212,14 @@ _DEFAULT_PROP_SPECS: dict[str, PropertySpec] = {
     name: PropertySpec(name, _DEFAULT_PROP_BINDING)
     for name in _DEFAULT_PROP_TYPES
 }
+
+def _is_cpu_node(node: "Node") -> bool:
+    # Returns True if 'node' is a /cpus/cpu@N node per DT spec SS3.8:
+    # a direct child of /cpus whose name-without-unit-address is "cpu".
+    # This structural check is used both to populate edt.cpus and to
+    # decide whether to apply the cpu.yaml fallback in _init_binding().
+    return bool(
+        node.parent
+        and node.parent.path == "/cpus"
+        and node.name.split("@", 1)[0] == "cpu"
+    )

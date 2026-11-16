@@ -15,11 +15,21 @@
 extern "C" {
 #endif
 
+#if (CONFIG_LV_Z_BITS_PER_PIXEL == 1) || defined(CONFIG_LV_COLOR_FORMAT_I1)
+#define IS_MONOCHROME_DISPLAY 1
+#else
+#define IS_MONOCHROME_DISPLAY 0
+#endif
+
 struct lvgl_disp_data {
 	const struct device *display_dev;
 	struct display_capabilities cap;
 #ifdef CONFIG_LV_Z_FLUSH_THREAD
 	struct k_sem flush_complete;
+#endif
+#ifdef CONFIG_LV_Z_MONOCHROME_CONVERSION_BUFFER
+	uint8_t *mono_conv_buf;
+	uint32_t mono_conv_buf_size;
 #endif
 	bool blanking_on;
 };
@@ -39,7 +49,6 @@ void lvgl_flush_cb_24bit(lv_display_t *display, const lv_area_t *area, uint8_t *
 void lvgl_flush_cb_32bit(lv_display_t *display, const lv_area_t *area, uint8_t *px_map);
 
 void lvgl_rounder_cb_mono(lv_event_t *e);
-void lvgl_set_mono_conversion_buffer(uint8_t *buffer, uint32_t buffer_size);
 
 int set_lvgl_rendering_cb(lv_display_t *display);
 

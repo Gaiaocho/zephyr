@@ -7,12 +7,13 @@
 
 #include <zephyr/ztest.h>
 #include <zephyr/interrupt_util.h>
+#include <zephyr/irq_multilevel.h>
 
 /*
  * Run the nested interrupt test for the supported platforms only.
  */
 #if defined(CONFIG_CPU_CORTEX_M) || defined(CONFIG_ARC) || \
-	defined(CONFIG_GIC) || defined(CONFIG_NRFX_CLIC)
+	defined(CONFIG_GIC) || defined(CONFIG_RISCV_NESTED_INTERRUPTS)
 #define TEST_NESTED_ISR
 #endif
 
@@ -20,6 +21,13 @@
 
 #define ISR0_TOKEN	0xDEADBEEF
 #define ISR1_TOKEN	0xCAFEBABE
+
+#if defined(CONFIG_RISCV_CORE_NORDIC_VPR)
+/* Software-triggerable VEVIF task lines of a Nordic VPR core, see below. */
+#define VPR_VEVIF_NODE		DT_INST(0, nordic_nrf_vevif_task_rx)
+#define VPR_VEVIF_IRQ(idx)	DT_IRQ_BY_IDX(VPR_VEVIF_NODE, idx, irq)
+#define VPR_VEVIF_LAST_IDX	UTIL_DEC(DT_NUM_IRQS(VPR_VEVIF_NODE))
+#endif
 
 /*
  * This test uses two IRQ lines selected within the range of available IRQs on
@@ -62,26 +70,69 @@
  */
 #define IRQ0_PRIO	IRQ_DEFAULT_PRIORITY
 #define IRQ1_PRIO	0x0
-#elif (defined(CONFIG_SOC_SERIES_NRF54L) || defined(CONFIG_SOC_NRF54H20_CPUFLPR)) && \
-	defined(CONFIG_RISCV_CORE_NORDIC_VPR)
-#define IRQ0_LINE	16
-#define IRQ1_LINE	17
+#elif defined(CONFIG_RISCV_CORE_NORDIC_VPR) && DT_NODE_EXISTS(VPR_VEVIF_NODE)
+/*
+ * On Nordic VPR cores, the VEVIF task lines are the only CLIC lines that are not
+ * wired to a peripheral, so use the two highest ones.  The VEVIF mailbox is not
+ * enabled in this test, meaning its driver does not claim these lines.
+ */
+#define IRQ0_LINE	VPR_VEVIF_IRQ(VPR_VEVIF_LAST_IDX)
+#define IRQ1_LINE	VPR_VEVIF_IRQ(UTIL_DEC(VPR_VEVIF_LAST_IDX))
 
 #define IRQ0_PRIO	1
 #define IRQ1_PRIO	2
-#elif (defined(CONFIG_SOC_SERIES_NRF54H) || defined(CONFIG_SOC_SERIES_NRF92)) && \
-	defined(CONFIG_RISCV_CORE_NORDIC_VPR)
-#define IRQ0_LINE	14
-#define IRQ1_LINE	15
+#elif defined(CONFIG_RISCV_NESTED_INTERRUPTS) && defined(CONFIG_PLIC_SUPPORTS_SOFT_INTERRUPT)
+/*
+ * PLIC sources are second level interrupts behind the machine external
+ * interrupt. A larger priority number is more urgent.
+ */
+#define IRQ0_LINE	(IRQ_TO_L2(14) | RISCV_IRQ_MEXT)
+#define IRQ1_LINE	(IRQ_TO_L2(15) | RISCV_IRQ_MEXT)
 
 #define IRQ0_PRIO	1
 #define IRQ1_PRIO	2
-#elif defined(CONFIG_SOC_SERIES_NRF71) && defined(CONFIG_RISCV_CORE_NORDIC_VPR)
+#elif defined(CONFIG_RISCV_NESTED_INTERRUPTS) && defined(CONFIG_CLIC)
+/*
+ * The CLIC lines that software can trigger depend on the SoC. The test is
+ * skipped on other SoCs. A larger priority gives a higher level, which
+ * preempts a lower one.
+ */
+#if defined(CONFIG_SOC_AE350_INTERRUPT_TYPE_CLIC)
 #define IRQ0_LINE	19
 #define IRQ1_LINE	20
+#endif
 
 #define IRQ0_PRIO	1
 #define IRQ1_PRIO	2
+#elif defined(CONFIG_RISCV_NESTED_INTERRUPTS) && defined(CONFIG_RISCV_HAS_AIA)
+/*
+ * In AIA a smaller number is more urgent. MSI mode orders by identity only,
+ * so IRQ1 gets both the smaller priority and the smaller source number.
+ */
+#define IRQ0_LINE	(IRQ_TO_L2(10) | CONFIG_2ND_LVL_INTR_00_OFFSET)
+#define IRQ1_LINE	(IRQ_TO_L2(9) | CONFIG_2ND_LVL_INTR_00_OFFSET)
+
+#define IRQ0_PRIO	2
+#define IRQ1_PRIO	1
+#elif defined(CONFIG_RISCV_NESTED_INTERRUPTS)
+/*
+ * Otherwise use the supervisor software and timer interrupts, which an
+ * M-mode kernel leaves unused and can set pending in mip. They are ordered
+ * by the specification, which ranks the software interrupt above the timer
+ * interrupt, so the priorities are not used.
+ */
+#define IRQ0_LINE	IRQ_S_TIMER
+#define IRQ1_LINE	IRQ_S_SOFT
+
+#define IRQ0_PRIO	0
+#define IRQ1_PRIO	0
+
+/*
+ * A local interrupt has no controller driver to enable interrupts for its
+ * ISR, so isr0 does it itself.
+ */
+#define ISR0_UNLOCK_IRQ()	arch_irq_unlock(RV_STATUS_IE)
+#define ISR0_LOCK_IRQ()		((void)arch_irq_lock())
 #else
 /*
  * For all the other platforms, use the last two available IRQ lines for
@@ -92,6 +143,26 @@
 
 #define IRQ0_PRIO	1
 #define IRQ1_PRIO	0
+#endif
+
+/*
+ * A CLIC only lets software set the pending bit of an edge triggered
+ * interrupt, the one of a level triggered interrupt follows its input.
+ * An APLIC source is edge triggered, so that software can set it pending.
+ */
+#if defined(CONFIG_RISCV_HAS_CLIC)
+#define IRQ_TRIG_FLAGS	1 /* rising edge */
+#elif defined(CONFIG_RISCV_HAS_AIA)
+#include <zephyr/drivers/interrupt_controller/riscv_aplic.h>
+#define IRQ_TRIG_FLAGS	APLIC_SM_EDGE_RISE
+#else
+#define IRQ_TRIG_FLAGS	0
+#endif
+
+/* Everywhere else an ISR runs with interrupts already enabled */
+#ifndef ISR0_UNLOCK_IRQ
+#define ISR0_UNLOCK_IRQ()
+#define ISR0_LOCK_IRQ()
 #endif
 
 #ifdef TEST_NESTED_ISR
@@ -122,6 +193,8 @@ void isr0(const void *param)
 	/* Set verification token */
 	isr0_result = ISR0_TOKEN;
 
+	ISR0_UNLOCK_IRQ();
+
 	/* Trigger nested IRQ 1 */
 	trigger_irq(irq_line_1);
 
@@ -130,6 +203,8 @@ void isr0(const void *param)
 
 	/* Validate nested ISR result token */
 	zassert_equal(isr1_result, ISR1_TOKEN, "isr1 did not execute");
+
+	ISR0_LOCK_IRQ();
 
 	k_str_out_count("ISR0: Leave\n");
 }
@@ -159,7 +234,11 @@ ZTEST(interrupt_feature, test_nested_isr)
 	irq_line_0 = IRQ0_LINE;
 	irq_line_1 = IRQ1_LINE;
 #elif defined(CONFIG_CPU_CORTEX_M) && defined(CONFIG_DYNAMIC_INTERRUPTS)
+#ifdef CONFIG_2ND_LVL_ISR_TBL_OFFSET
+	irq_line_0 = get_available_nvic_line(CONFIG_2ND_LVL_ISR_TBL_OFFSET);
+#else
 	irq_line_0 = get_available_nvic_line(CONFIG_NUM_IRQS);
+#endif
 	irq_line_1 = get_available_nvic_line(irq_line_0);
 #else
 	ztest_test_skip();
@@ -167,8 +246,8 @@ ZTEST(interrupt_feature, test_nested_isr)
 
 	/* Connect and enable test IRQs */
 #if defined(IRQ0_LINE) && defined(IRQ1_LINE)
-	IRQ_CONNECT(IRQ0_LINE, IRQ0_PRIO, isr0, 0, 0);
-	IRQ_CONNECT(IRQ1_LINE, IRQ1_PRIO, isr1, 0, 0);
+	IRQ_CONNECT(IRQ0_LINE, IRQ0_PRIO, isr0, 0, IRQ_TRIG_FLAGS);
+	IRQ_CONNECT(IRQ1_LINE, IRQ1_PRIO, isr1, 0, IRQ_TRIG_FLAGS);
 #else
 	arch_irq_connect_dynamic(irq_line_0, IRQ0_PRIO, isr0, NULL, 0);
 	arch_irq_connect_dynamic(irq_line_1, IRQ1_PRIO, isr1, NULL, 0);

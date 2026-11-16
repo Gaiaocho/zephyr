@@ -43,12 +43,12 @@ extern "C" {
 #define PPP_INTERFACE_IDENTIFIER_LEN 8
 
 /** PPP L2 API */
-struct ppp_api {
+__subsystem struct ppp_driver_api {
 	/**
-	 * The net_if_api must be placed in first position in this
+	 * The net_if_driver_api must be placed in first position in this
 	 * struct so that we are compatible with network interface API.
 	 */
-	struct net_if_api iface_api;
+	struct net_if_driver_api iface_api;
 
 	/** Start the device */
 	int (*start)(const struct device *dev);
@@ -68,10 +68,9 @@ struct ppp_api {
 #endif
 };
 
-/* Make sure that the network interface API is properly setup inside
- * PPP API struct (it is the first one).
- */
-BUILD_ASSERT(offsetof(struct ppp_api, iface_api) == 0);
+/** @cond INTERNAL_HIDDEN */
+DEVICE_API_EXTENDS(ppp, net_if, iface_api);
+/** @endcond */
 
 /**
  * PPP protocol types.
@@ -79,16 +78,16 @@ BUILD_ASSERT(offsetof(struct ppp_api, iface_api) == 0);
  * for details.
  */
 enum ppp_protocol_type {
-	PPP_IP     = 0x0021, /**< RFC 1332 */
-	PPP_IPV6   = 0x0057, /**< RFC 5072 */
-	PPP_IPCP   = 0x8021, /**< RFC 1332 */
-	PPP_ECP    = 0x8053, /**< RFC 1968 */
-	PPP_IPV6CP = 0x8057, /**< RFC 5072 */
-	PPP_CCP    = 0x80FD, /**< RFC 1962 */
-	PPP_LCP    = 0xc021, /**< RFC 1661 */
-	PPP_PAP    = 0xc023, /**< RFC 1334 */
-	PPP_CHAP   = 0xc223, /**< RFC 1334 */
-	PPP_EAP    = 0xc227, /**< RFC 2284 */
+	PPP_IP     = 0x0021, /**< @rfc{1332} */
+	PPP_IPV6   = 0x0057, /**< @rfc{5072} */
+	PPP_IPCP   = 0x8021, /**< @rfc{1332} */
+	PPP_ECP    = 0x8053, /**< @rfc{1968} */
+	PPP_IPV6CP = 0x8057, /**< @rfc{5072} */
+	PPP_CCP    = 0x80FD, /**< @rfc{1962} */
+	PPP_LCP    = 0xc021, /**< @rfc{1661} */
+	PPP_PAP    = 0xc023, /**< @rfc{1334} */
+	PPP_CHAP   = 0xc223, /**< @rfc{1334} */
+	PPP_EAP    = 0xc227, /**< @rfc{2284} */
 };
 
 /**
@@ -147,7 +146,7 @@ enum ppp_packet_type {
 /** @endcond */
 
 /**
- * LCP option types from RFC 1661 ch. 6
+ * LCP option types from @rfc{1661,section-6}
  */
 enum lcp_option_type {
 	/** Reserved option value (do not use) */
@@ -176,7 +175,7 @@ enum lcp_option_type {
 } __packed;
 
 /**
- * IPCP option types from RFC 1332
+ * IPCP option types from @rfc{1332}
  */
 enum ipcp_option_type {
 	/** Reserved IPCP option value (do not use) */
@@ -207,7 +206,7 @@ enum ipcp_option_type {
 } __packed;
 
 /**
- * IPV6CP option types from RFC 5072
+ * IPV6CP option types from @rfc{5072}
  */
 enum ipv6cp_option_type {
 	/** Reserved IPV6CP option value (do not use) */
@@ -515,9 +514,6 @@ struct ppp_context {
 
 	/** Signal when PPP link is terminated */
 	struct k_sem wait_ppp_link_terminated;
-
-	/** Signal when PPP link is down */
-	struct k_sem wait_ppp_link_down;
 
 	/** This tells what features the PPP supports. */
 	enum net_l2_flags ppp_l2_flags;

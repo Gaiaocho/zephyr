@@ -194,7 +194,7 @@ static inline void lpspi_handle_tx_irq(const struct device *dev)
 
 	base->SR = LPSPI_SR_TDF_MASK;
 
-	if (op_mode == SPI_OP_MODE_SLAVE && (status_flags & LPSPI_SR_TEF_MASK)) {
+	if (op_mode == SPI_OP_MODE_PERIPHERAL && (status_flags & LPSPI_SR_TEF_MASK)) {
 		/* handling err051588 */
 		base->SR = LPSPI_SR_TEF_MASK;
 		/* workaround is to reset the transmit fifo before writing any new data */
@@ -219,19 +219,19 @@ static inline void lpspi_end_xfer(const struct device *dev)
 	struct lpspi_data *data = dev->data;
 	struct spi_context *ctx = &data->ctx;
 
-	spi_context_complete(ctx, dev, 0);
-
 #ifdef CONFIG_CPU_CORTEX_M
 	const struct lpspi_config *config = dev->config;
 	NVIC_ClearPendingIRQ(config->irqn);
 #endif
 
 	if (!(ctx->config->operation & SPI_HOLD_ON_CS)) {
-		base->TCR &= ~(LPSPI_TCR_CONT_MASK | LPSPI_TCR_CONTC_MASK);
+		base->TCR = lpspi_read_tcr(base) & ~(LPSPI_TCR_CONT_MASK | LPSPI_TCR_CONTC_MASK);
 		/* don't need to wait for TCR since we are at end of xfer + in IRQ context */
 	}
 	spi_context_cs_control(ctx, false);
-	spi_context_release(&data->ctx, 0);
+
+	/* Last, as the caller may start the next transfer as soon as it is woken */
+	spi_context_complete(ctx, dev, 0);
 }
 
 static void lpspi_isr(const struct device *dev)
@@ -279,7 +279,7 @@ static void lpspi_isr(const struct device *dev)
 		 * in order to get last bit clocked out on bus. So all we need to do is touch the
 		 * TCR by writing to fifo through TCR register and wait for final RX interrupt.
 		 */
-		base->TCR = base->TCR;
+		base->TCR = lpspi_read_tcr(base);
 		return;
 	}
 
@@ -316,7 +316,8 @@ static void lpspi_isr(const struct device *dev)
 	lpspi_fill_tx_fifo_nop(dev, max_fill);
 }
 
-static void lpspi_master_setup_native_cs(const struct device *dev, const struct spi_config *spi_cfg)
+static void lpspi_controller_setup_native_cs(const struct device *dev,
+					     const struct spi_config *spi_cfg)
 {
 	LPSPI_Type *base = (LPSPI_Type *)DEVICE_MMIO_NAMED_GET(dev, reg_base);
 
@@ -325,10 +326,10 @@ static void lpspi_master_setup_native_cs(const struct device *dev, const struct 
 	 * to also set CONTC in order to continue the previous command to keep CS
 	 * asserted.
 	 */
-	if (spi_cfg->operation & SPI_HOLD_ON_CS || base->TCR & LPSPI_TCR_CONTC_MASK) {
-		base->TCR |= LPSPI_TCR_CONTC_MASK | LPSPI_TCR_CONT_MASK;
+	if (spi_cfg->operation & SPI_HOLD_ON_CS || lpspi_read_tcr(base) & LPSPI_TCR_CONTC_MASK) {
+		base->TCR = lpspi_read_tcr(base) | LPSPI_TCR_CONTC_MASK | LPSPI_TCR_CONT_MASK;
 	} else {
-		base->TCR |= LPSPI_TCR_CONT_MASK;
+		base->TCR = lpspi_read_tcr(base) | LPSPI_TCR_CONT_MASK;
 	}
 
 	/* tcr is written to tx fifo */
@@ -357,7 +358,7 @@ static int transceive(const struct device *dev, const struct spi_config *spi_cfg
 		goto error;
 	}
 
-	if (op_mode == SPI_OP_MODE_SLAVE && !(spi_cfg->operation & SPI_MODE_CPHA)) {
+	if (op_mode == SPI_OP_MODE_PERIPHERAL && !(spi_cfg->operation & SPI_MODE_CPHA)) {
 		LOG_ERR("CPHA=0 not supported with LPSPI peripheral mode");
 		ret = -ENOTSUP;
 		goto error;
@@ -393,26 +394,26 @@ static int transceive(const struct device *dev, const struct spi_config *spi_cfg
 	LOG_DBG("Starting LPSPI transfer");
 	spi_context_cs_control(ctx, true);
 
-	if (op_mode == SPI_OP_MODE_MASTER) {
+	if (op_mode == SPI_OP_MODE_CONTROLLER) {
 		/* set watermarks to 0 so get tx interrupt when fifo empty
 		 * and rx interrupt when any data received
 		 */
 		base->FCR = 0;
 	} else {
-		 /* set watermarks so that we are as responsive to master as possible and don't
-		  * miss any communication. This means RX interrupt at 0 so that if we ever
-		  * get any data, we get interrupt and handle immediately, and TX interrupt
-		  * to one less than the max of the fifo (-2 of size) so that we have as much
-		  * data ready to send to master as possible at any time
-		  */
+		/* set watermarks so that we are as responsive to controller as possible and don't
+		 * miss any communication. This means RX interrupt at 0 so that if we ever
+		 * get any data, we get interrupt and handle immediately, and TX interrupt
+		 * to one less than the max of the fifo (-2 of size) so that we have as much
+		 * data ready to send to controller as possible at any time
+		 */
 		base->FCR = LPSPI_FCR_TXWATER(config->tx_fifo_size - 1);
 		base->CFGR1 |= LPSPI_CFGR1_AUTOPCS_MASK;
 	}
 
-	base->CR |= LPSPI_CR_MEN_MASK;
+	lpspi_enable(base, true);
 
-	if (op_mode == SPI_OP_MODE_MASTER) {
-		lpspi_master_setup_native_cs(dev, spi_cfg);
+	if (op_mode == SPI_OP_MODE_CONTROLLER) {
+		lpspi_controller_setup_native_cs(dev, spi_cfg);
 	}
 
 	/* start the transfer sequence which are handled by irqs */
@@ -421,11 +422,17 @@ static int transceive(const struct device *dev, const struct spi_config *spi_cfg
 	base->IER |= LPSPI_IER_TDIE_MASK | LPSPI_IER_RDIE_MASK;
 
 	ret = spi_context_wait_for_completion(ctx);
-	if (ret >= 0) {
+	/* spi_context_complete() releases the lock of an asynchronous transfer, and
+	 * by now ctx may already belong to the next caller.
+	 */
+	if (asynchronous && ret >= 0) {
 		return ret;
 	}
 
 error:
+	/* Not from the ISR: the next caller could then take this caller's
+	 * completion from the shared semaphore.
+	 */
 	spi_context_release(ctx, ret);
 	return ret;
 }
@@ -471,7 +478,7 @@ static int lpspi_init(const struct device *dev)
 
 	base = (LPSPI_Type *)DEVICE_MMIO_NAMED_GET(dev, reg_base);
 
-	/* Starting config should be master with active low CS, to make sure
+	/* Starting config should be controller with active low CS, to make sure
 	 * the CS lines are configured properly at init for the most common use
 	 * cases. This can be changed later on transceive call if user specifies
 	 * different spi configuration.

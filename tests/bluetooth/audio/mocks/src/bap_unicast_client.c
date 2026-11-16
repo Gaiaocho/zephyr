@@ -28,12 +28,15 @@
 
 #include "audio/bap_endpoint.h"
 #include "audio/bap_iso.h"
+#include "bap_unicast_client.h"
 #include "conn.h"
 
 LOG_MODULE_REGISTER(bt_bap_unicast_client, CONFIG_BT_BAP_UNICAST_CLIENT_LOG_LEVEL);
 
 static sys_slist_t unicast_client_cbs = SYS_SLIST_STATIC_INIT(&unicast_client_cbs);
 static struct bt_bap_unicast_group bap_unicast_group;
+static const struct bt_bap_stream *disable_err_stream;
+static int disable_err;
 
 static struct unicast_client {
 #if CONFIG_BT_BAP_UNICAST_CLIENT_ASE_SNK_COUNT > 0
@@ -44,6 +47,12 @@ static struct unicast_client {
 #endif /* CONFIG_BT_BAP_UNICAST_CLIENT_ASE_SRC_COUNT > 0 */
 	struct bt_conn *conn;
 } uni_cli_insts[CONFIG_BT_MAX_CONN];
+
+void mock_bap_unicast_client_set_disable_err(const struct bt_bap_stream *stream, int err)
+{
+	disable_err_stream = stream;
+	disable_err = err;
+}
 
 bool bt_bap_unicast_client_has_ep(const struct bt_bap_ep *ep)
 {
@@ -206,13 +215,13 @@ int bt_bap_unicast_client_qos(struct bt_conn *conn, struct bt_bap_unicast_group 
 	}
 
 	SYS_SLIST_FOR_EACH_CONTAINER(&group->streams, stream, _node) {
-		__maybe_unused const int err =
-			bt_bap_unicast_client_qos_from_group(stream, &stream->ep->qos);
-
-		__ASSERT(err == 0, "%d", err);
-		stream->qos = &stream->ep->qos;
-
 		if (stream->conn == conn) {
+			__maybe_unused const int err =
+				bt_bap_unicast_client_qos_from_group(stream, &stream->ep->qos);
+
+			__ASSERT(err == 0, "%d", err);
+			stream->qos = &stream->ep->qos;
+
 			SYS_SLIST_FOR_EACH_CONTAINER_SAFE(&unicast_client_cbs, listener, next,
 							  _node) {
 				if (listener->qos != NULL) {
@@ -390,6 +399,12 @@ int bt_bap_unicast_client_disable(struct bt_bap_stream *stream)
 		break;
 	default:
 		return -EINVAL;
+	}
+
+	if (stream == disable_err_stream) {
+		disable_err_stream = NULL;
+
+		return disable_err;
 	}
 
 	/* Even though the ASCS spec does not have the disabling state for sink ASEs, the unicast
@@ -844,6 +859,34 @@ int bt_bap_unicast_group_reconfig(struct bt_bap_unicast_group *unicast_group,
 {
 	if (unicast_group == NULL || param == NULL) {
 		return -EINVAL;
+	}
+
+	if (unicast_group->has_been_connected) {
+		LOG_DBG("Cannot modify a unicast_group where a CIS has been connected");
+		return -EINVAL;
+	}
+
+	/* Update the stream and group parameters */
+	for (size_t i = 0U; i < param->params_count; i++) {
+		struct bt_bap_unicast_group_stream_pair_param *stream_param = &param->params[i];
+		struct bt_bap_unicast_group_stream_param *rx_param = stream_param->rx_param;
+		struct bt_bap_unicast_group_stream_param *tx_param = stream_param->tx_param;
+
+		if (rx_param != NULL) {
+			struct bt_bap_iso *bap_iso =
+				CONTAINER_OF(rx_param->stream->iso, struct bt_bap_iso, chan);
+
+			unicast_group_set_iso_stream_param(unicast_group, bap_iso, rx_param->qos,
+							   BT_AUDIO_DIR_SOURCE);
+		}
+
+		if (tx_param != NULL) {
+			struct bt_bap_iso *bap_iso =
+				CONTAINER_OF(tx_param->stream->iso, struct bt_bap_iso, chan);
+
+			unicast_group_set_iso_stream_param(unicast_group, bap_iso, tx_param->qos,
+							   BT_AUDIO_DIR_SINK);
+		}
 	}
 
 	return 0;

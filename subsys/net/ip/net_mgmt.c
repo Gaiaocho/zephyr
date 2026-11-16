@@ -42,6 +42,9 @@ struct mgmt_event_wait {
 
 static K_MUTEX_DEFINE(net_mgmt_callback_lock);
 
+/* Thread running callbacks, written with net_mgmt_callback_lock held */
+static atomic_ptr_t callback_thread;
+
 #if defined(CONFIG_NET_MGMT_EVENT_THREAD)
 K_KERNEL_STACK_DEFINE(mgmt_stack, CONFIG_NET_MGMT_EVENT_STACK_SIZE);
 
@@ -66,6 +69,10 @@ static struct k_work_q *mgmt_work_q = COND_CODE_1(CONFIG_NET_MGMT_EVENT_SYSTEM_W
 
 static void mgmt_event_work_handler(struct k_work *work);
 static K_WORK_DEFINE(mgmt_work, mgmt_event_work_handler);
+
+/* Event whose callbacks are running. */
+static bool mgmt_current_event_valid;
+static uint64_t mgmt_current_event;
 
 static inline void mgmt_push_event(uint64_t mgmt_event, struct net_if *iface,
 				   const void *info, size_t length)
@@ -100,9 +107,12 @@ static inline void mgmt_push_event(uint64_t mgmt_event, struct net_if *iface,
 	if (k_msgq_put(&event_msgq, &new_event,
 		K_MSEC(CONFIG_NET_MGMT_EVENT_QUEUE_TIMEOUT)) != 0) {
 		NET_WARN("Failure to push event (0x%" PRIx64 "), "
+			 "handling (0x%" PRIx64 ", %s), "
 			 "try increasing the 'CONFIG_NET_MGMT_EVENT_QUEUE_SIZE' "
 			 "or 'CONFIG_NET_MGMT_EVENT_QUEUE_TIMEOUT' options.",
-			 mgmt_event);
+			 mgmt_event,
+			 mgmt_current_event_valid ? mgmt_current_event : 0,
+			 mgmt_current_event_valid ? "valid" : "none");
 	}
 
 	(void)k_mutex_unlock(&net_mgmt_event_lock);
@@ -119,7 +129,10 @@ static void mgmt_event_work_handler(struct k_work *work)
 	while (k_msgq_get(&event_msgq, &mgmt_event, K_NO_WAIT) == 0) {
 		NET_DBG("Handling events, forwarding it relevantly");
 
+		mgmt_current_event = mgmt_event.event;
+		mgmt_current_event_valid = true;
 		mgmt_run_callbacks(&mgmt_event);
+		mgmt_current_event_valid = false;
 
 		/* forcefully give up our timeslot, to give time to the callback */
 		k_yield();
@@ -273,13 +286,38 @@ static inline void mgmt_run_static_callbacks(const struct mgmt_event_entry * con
 
 static void mgmt_run_callbacks(const struct mgmt_event_entry * const mgmt_event)
 {
+	atomic_ptr_val_t prev;
+
 	/* take the lock to prevent changes to the callback structure during use */
 	(void)k_mutex_lock(&net_mgmt_callback_lock, K_FOREVER);
+
+	/* Direct delivery can nest when a callback notifies another event */
+	prev = atomic_ptr_set(&callback_thread, k_current_get());
 
 	mgmt_run_static_callbacks(mgmt_event);
 	mgmt_run_slist_callbacks(mgmt_event);
 
+	(void)atomic_ptr_set(&callback_thread, prev);
 	(void)k_mutex_unlock(&net_mgmt_callback_lock);
+}
+
+bool net_mgmt_is_event_context(void)
+{
+	k_tid_t self = k_current_get();
+
+	/* Read without the lock: only the current thread can set it to itself */
+	if (atomic_ptr_get(&callback_thread) == self) {
+		return true;
+	}
+
+#if defined(CONFIG_NET_MGMT_EVENT_QUEUE)
+	/* Any work item on the queue that delivers events, also outside callbacks */
+	if (k_work_queue_thread_get(mgmt_work_q) == self) {
+		return true;
+	}
+#endif
+
+	return false;
 }
 
 static int mgmt_event_wait_call(struct net_if *iface,

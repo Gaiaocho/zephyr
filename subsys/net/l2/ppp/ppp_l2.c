@@ -107,6 +107,10 @@ static enum net_verdict process_ppp_msg(struct net_if *iface,
 
 	if ((IS_ENABLED(CONFIG_NET_IPV4) && protocol == PPP_IP) ||
 	    (IS_ENABLED(CONFIG_NET_IPV6) && protocol == PPP_IPV6)) {
+
+		net_pkt_set_ll_proto_type(pkt, protocol == PPP_IP ? NET_ETH_PTYPE_IP :
+								    NET_ETH_PTYPE_IPV6);
+
 		/* Remove the protocol field so that IP packet processing
 		 * continues properly in net_core.c:process_data()
 		 */
@@ -198,7 +202,7 @@ static int ppp_send(struct net_if *iface, struct net_pkt *pkt)
 {
 	const struct device *dev = net_if_get_device(iface);
 	struct ppp_context *ctx = net_if_l2_data(iface);
-	const struct ppp_api *api;
+	const struct ppp_driver_api *api;
 	int ret;
 
 	NET_ASSERT(dev != NULL);
@@ -270,7 +274,7 @@ static void ppp_open_async(struct ppp_context *ctx)
 static int ppp_up(struct net_if *iface)
 {
 	const struct device *dev = net_if_get_device(iface);
-	const struct ppp_api *ppp;
+	const struct ppp_driver_api *ppp;
 
 	NET_ASSERT(dev != NULL);
 
@@ -315,32 +319,18 @@ static int ppp_lcp_close(struct ppp_context *ctx)
 				 (1 + CONFIG_NET_L2_PPP_MAX_TERMINATE_REQ_RETRANSMITS)));
 }
 
-static void ppp_lcp_lower_down_async(struct ppp_context *ctx)
+static void ppp_lcp_lower_down(struct ppp_context *ctx)
 {
 	if (ctx->phase == PPP_DEAD) {
 		return;
 	}
 
-	if (ppp_lcp == NULL) {
-		ppp_change_phase(ctx, PPP_DEAD);
-	} else {
+	if (ppp_lcp != NULL) {
 		ppp_lcp->lower_down(ctx);
 	}
-}
 
-static int ppp_lcp_lower_down(struct ppp_context *ctx)
-{
-	if (ppp_lcp == NULL) {
-		ppp_change_phase(ctx, PPP_DEAD);
-	}
-
-	if (ctx->phase == PPP_DEAD) {
-		return 0;
-	}
-
-	k_sem_reset(&ctx->wait_ppp_link_down);
-	ppp_lcp->lower_down(ctx);
-	return k_sem_take(&ctx->wait_ppp_link_down, K_MSEC(CONFIG_NET_L2_PPP_TIMEOUT));
+	/* Without carrier the link is dead, whatever state LCP was in */
+	ppp_change_phase(ctx, PPP_DEAD);
 }
 
 /* Bring down network interface by terminating all protocols */
@@ -348,7 +338,7 @@ static int ppp_down(struct net_if *iface)
 {
 	const struct device *dev = net_if_get_device(iface);
 	struct ppp_context *ctx = net_if_l2_data(iface);
-	const struct ppp_api *ppp;
+	const struct ppp_driver_api *ppp;
 
 	NET_ASSERT(dev != NULL);
 
@@ -363,9 +353,7 @@ static int ppp_down(struct net_if *iface)
 		}
 	} else {
 		/* Terminate protocols */
-		if (ppp_lcp_lower_down(ctx) < 0) {
-			return -EAGAIN;
-		}
+		ppp_lcp_lower_down(ctx);
 	}
 
 	if (ppp->stop) {
@@ -570,7 +558,7 @@ static void net_ppp_mgmt_evt_handler(uint64_t mgmt_event, struct net_if *iface, 
 	}
 
 	if ((mgmt_event == NET_EVENT_IF_DOWN) && (!net_if_is_carrier_ok(iface))) {
-		ppp_lcp_lower_down_async(ctx);
+		ppp_lcp_lower_down(ctx);
 	}
 	if ((mgmt_event == NET_EVENT_IF_DOWN && net_if_is_carrier_ok(iface) &&
 	     net_if_is_dormant(iface))) {
@@ -595,7 +583,6 @@ void net_ppp_init(struct net_if *iface)
 	ctx->ppp_l2_flags = NET_L2_MULTICAST | NET_L2_POINT_TO_POINT;
 	ctx->iface = iface;
 	k_sem_init(&ctx->wait_ppp_link_terminated, 0, 1);
-	k_sem_init(&ctx->wait_ppp_link_down, 0, 1);
 
 #if defined(CONFIG_NET_SHELL)
 	k_sem_init(&ctx->shell.wait_echo_reply, 0, K_SEM_MAX_LIMIT);

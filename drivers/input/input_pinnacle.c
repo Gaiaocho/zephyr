@@ -687,7 +687,7 @@ static void pinnacle_data_ready_gpio_callback(const struct device *dev, struct g
 {
 	struct pinnacle_data *drv_data = CONTAINER_OF(cb, struct pinnacle_data, dr_cb_data);
 
-	k_work_submit(&drv_data->work);
+	input_work_submit(&drv_data->work);
 }
 
 static void pinnacle_work_cb(struct k_work *work)
@@ -883,7 +883,8 @@ static int pinnacle_init(const struct device *dev)
 		.seq_read = pinnacle_seq_read_i2c,                                                 \
 	}
 
-#define PINNACLE_SPI_OP (SPI_OP_MODE_MASTER | SPI_TRANSFER_MSB | SPI_MODE_CPHA | SPI_WORD_SET(8))
+#define PINNACLE_SPI_OP                                                                            \
+	(SPI_OP_MODE_CONTROLLER | SPI_TRANSFER_MSB | SPI_MODE_CPHA | SPI_WORD_SET(8))
 #define PINNACLE_CONFIG_BUS_SPI(inst)                                                              \
 	.bus = {                                                                                   \
 		.spi = SPI_DT_SPEC_INST_GET(inst, PINNACLE_SPI_OP),                                \

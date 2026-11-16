@@ -73,18 +73,13 @@ void als31300_parse_registers(const uint8_t *buf, struct als31300_readings *read
  * @brief Convert raw magnetic field value to microgauss
  * This function converts the 12-bit signed raw magnetic field value to
  * microgauss units
- * Formula: microgauss = (raw_value * 500 * 1000000) / 4096
+ * Based on datasheet formula: gauss = raw_value / sensitivity
  * @param raw_value Signed 12-bit magnetic field value
  * @return Magnetic field in microgauss
  */
 int32_t als31300_convert_to_gauss(int16_t raw_value)
 {
-	/* Convert to microgauss
-	 * For 500G full scale: (raw_value * 500 * 1000000) / 4096
-	 * This gives us the fractional part in microgauss
-	 */
-	return ((int64_t)raw_value * ALS31300_FULL_SCALE_RANGE_GAUSS * 1000000) /
-	       ALS31300_12BIT_RESOLUTION;
+	return ((int64_t)raw_value * 1000000) / ALS31300_SENSITIVITY_LSB_PER_GAUSS;
 }
 
 /**
@@ -258,18 +253,20 @@ static int als31300_init(const struct device *dev)
 }
 
 #define ALS31300_INIT(inst)                                                                        \
-	RTIO_DEFINE(als31300_rtio_ctx_##inst, 16, 16);                                             \
-	I2C_DT_IODEV_DEFINE(als31300_bus_##inst, DT_DRV_INST(inst));                               \
+	IF_ENABLED(CONFIG_SENSOR_ASYNC_API,                                                        \
+		   (RTIO_DEFINE(als31300_rtio_ctx_##inst, 16, 16);                                 \
+		    I2C_DT_IODEV_DEFINE(als31300_bus_##inst, DT_DRV_INST(inst));))                 \
                                                                                                    \
 	static struct als31300_data als31300_data_##inst;                                          \
                                                                                                    \
 	static const struct als31300_config als31300_config_##inst = {                             \
 		.i2c = I2C_DT_SPEC_INST_GET(inst),                                                 \
-		.bus =                                                                             \
-			{                                                                          \
-				.ctx = &als31300_rtio_ctx_##inst,                                  \
-				.iodev = &als31300_bus_##inst,                                     \
-			},                                                                         \
+		IF_ENABLED(CONFIG_SENSOR_ASYNC_API,                                                \
+			   (.bus =                                                                 \
+				    {                                                              \
+					    .ctx = &als31300_rtio_ctx_##inst,                      \
+					    .iodev = &als31300_bus_##inst,                         \
+				    },))                                                           \
 	};                                                                                         \
                                                                                                    \
 	SENSOR_DEVICE_DT_INST_DEFINE(inst, als31300_init, NULL, &als31300_data_##inst,             \

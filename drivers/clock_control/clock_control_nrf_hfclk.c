@@ -4,7 +4,6 @@
  */
 
 #include <soc.h>
-#include <zephyr/sys/onoff.h>
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include "nrf_clock_calibration.h"
@@ -25,25 +24,6 @@ LOG_MODULE_REGISTER(clock_control_hfclk, CONFIG_CLOCK_CONTROL_LOG_LEVEL);
 #define HF_USER_GENERIC BIT(1)
 
 static atomic_t hfclk_users;
-
-static void onoff_start(struct onoff_manager *mgr, onoff_notify_fn notify)
-{
-	int err;
-
-	err = common_async_start(CLOCK_DEVICE_HFCLK, common_onoff_started_callback, notify,
-				 COMMON_CTX_ONOFF);
-	if (err < 0) {
-		notify(mgr, err);
-	}
-}
-
-static void onoff_stop(struct onoff_manager *mgr, onoff_notify_fn notify)
-{
-	int res;
-
-	res = common_stop(CLOCK_DEVICE_HFCLK, COMMON_CTX_ONOFF);
-	notify(mgr, res);
-}
 
 static void clock_event_handler(void)
 {
@@ -139,117 +119,69 @@ uint32_t z_nrf_clock_bt_ctlr_hf_get_startup_time_us(void)
 }
 #endif
 
-static int api_start(const struct device *dev, clock_control_subsys_t subsys, clock_control_cb_t cb,
-		     void *user_data)
+#if NRF_CLOCK_FEATURE_HFCLK_DIVIDE_PRESENT
+
+#define HFCLK_CLOCK_FREQUENCIES DT_INST_PROP(0, supported_clock_frequencies)
+
+#define HFCLK_CLOCK_FREQUENCIES_SIZE DT_INST_PROP_LEN(0, supported_clock_frequencies)
+
+BUILD_ASSERT(HFCLK_CLOCK_FREQUENCIES_SIZE < UINT8_MAX,
+	"Supported frequencies count has to be lower than UINT8_MAX");
+
+static const uint32_t supported_frequencies[HFCLK_CLOCK_FREQUENCIES_SIZE] =
+		HFCLK_CLOCK_FREQUENCIES;
+
+static int hfclk_set_rate(const struct device *dev, clock_control_subsys_t sys,
+			  clock_control_subsys_rate_t rate)
 {
-	ARG_UNUSED(subsys);
+	uint32_t freq_hz = (uint32_t)(uintptr_t)rate;
+	nrf_clock_hfclk_div_t divider = UINT8_MAX;
+
 	ARG_UNUSED(dev);
+	ARG_UNUSED(sys);
 
-	return common_async_start(CLOCK_DEVICE_HFCLK, cb, user_data, COMMON_CTX_API);
-}
+	for (uint32_t i = 0; i < HFCLK_CLOCK_FREQUENCIES_SIZE; i++) {
+		if (supported_frequencies[i] == freq_hz) {
+			divider = i;
+			break;
+		}
+	}
 
-static int api_blocking_start(const struct device *dev, clock_control_subsys_t subsys)
-{
-	ARG_UNUSED(subsys);
-	ARG_UNUSED(dev);
-
-	struct k_sem sem = Z_SEM_INITIALIZER(sem, 0, 1);
-	int err;
-
-	if (!IS_ENABLED(CONFIG_MULTITHREADING)) {
+	if (divider == UINT8_MAX) {
 		return -ENOTSUP;
 	}
 
-	err = api_start(NULL, NULL, common_blocking_start_callback, &sem);
-	if (err < 0) {
-		return err;
+	if (nrfx_clock_hfclk_divider_get() == divider) {
+		return -EALREADY;
 	}
 
-	return k_sem_take(&sem, K_MSEC(500));
-}
-
-static int api_stop(const struct device *dev, clock_control_subsys_t subsys)
-{
-	ARG_UNUSED(subsys);
-	ARG_UNUSED(dev);
-
-	return common_stop(CLOCK_DEVICE_HFCLK, COMMON_CTX_API);
-}
-
-static enum clock_control_status api_get_status(const struct device *dev,
-						clock_control_subsys_t subsys)
-{
-	ARG_UNUSED(subsys);
-	ARG_UNUSED(dev);
-
-	return COMMON_GET_STATUS(((common_clock_data_t *)CLOCK_DEVICE_HFCLK->data)->flags);
-}
-
-static int api_request(const struct device *dev, const struct nrf_clock_spec *spec,
-		       struct onoff_client *cli)
-{
-	ARG_UNUSED(spec);
-	ARG_UNUSED(dev);
-
-	return onoff_request(&((common_clock_data_t *)CLOCK_DEVICE_HFCLK->data)->mgr, cli);
-}
-
-static int api_release(const struct device *dev, const struct nrf_clock_spec *spec)
-{
-	ARG_UNUSED(spec);
-	ARG_UNUSED(dev);
-
-	return onoff_release(&((common_clock_data_t *)CLOCK_DEVICE_HFCLK->data)->mgr);
-}
-
-static int api_cancel_or_release(const struct device *dev, const struct nrf_clock_spec *spec,
-				 struct onoff_client *cli)
-{
-	ARG_UNUSED(spec);
-	ARG_UNUSED(dev);
-
-	return onoff_cancel_or_release(&((common_clock_data_t *)CLOCK_DEVICE_HFCLK->data)->mgr,
-				       cli);
-}
-
-static int clk_init(const struct device *dev)
-{
-	ARG_UNUSED(dev);
-
-	int err;
-	static const struct onoff_transitions transitions = {.start = onoff_start,
-							     .stop = onoff_stop};
-
-	common_connect_irq();
-
-	if (nrfx_clock_hfclk_init(clock_event_handler) != 0) {
-		return -EIO;
-	}
-
-	err = onoff_manager_init(&((common_clock_data_t *)CLOCK_DEVICE_HFCLK->data)->mgr,
-				 &transitions);
-	if (err < 0) {
-		return err;
-	}
-
-	((common_clock_data_t *)CLOCK_DEVICE_HFCLK->data)->flags = CLOCK_CONTROL_STATUS_OFF;
+	nrfx_clock_hfclk_divider_set(divider);
 
 	return 0;
 }
 
-CLOCK_CONTROL_NRF_IRQ_HANDLERS_ITERABLE(clock_control_nrf_hfclk, &nrfx_clock_hfclk_irq_handler);
+static int hfclk_get_rate(const struct device *dev, clock_control_subsys_t sys, uint32_t *rate)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(sys);
 
-static DEVICE_API(nrf_clock_control, clock_control_api) = {
-	.std_api = {
-		.on = api_blocking_start,
-		.off = api_stop,
-		.async_on = api_start,
-		.get_status = api_get_status,
-	},
-	.request = api_request,
-	.release = api_release,
-	.cancel_or_release = api_cancel_or_release,
-};
+	*rate = supported_frequencies[nrfx_clock_hfclk_divider_get()];
+
+	return 0;
+}
+
+#endif /* NRF_CLOCK_FEATURE_HFCLK_DIVIDE_PRESENT */
+
+static int clk_init(const struct device *dev)
+{
+	if (nrfx_clock_hfclk_init(clock_event_handler) != 0) {
+		return -EIO;
+	}
+
+	return common_clk_init(dev);
+}
+
+CLOCK_CONTROL_NRF_IRQ_HANDLERS_ITERABLE(clock_control_nrf_hfclk, &nrfx_clock_hfclk_irq_handler);
 
 static common_clock_data_t data;
 
@@ -258,5 +190,32 @@ static const common_clock_config_t config = {
 	.stop = generic_hfclk_stop,
 };
 
+#if NRF_CLOCK_FEATURE_HFCLK_DIVIDE_PRESENT
+
+DEVICE_API(nrf_clock_control, hfclk_clock_control_api) = {
+	.std_api = {
+		.on = common_api_blocking_start,
+		.off = common_api_stop,
+		.async_on = common_api_start,
+		.get_status = common_api_get_status,
+		.get_rate = hfclk_get_rate,
+		.set_rate = hfclk_set_rate,
+	},
+#if defined(CONFIG_CLOCK_CONTROL_NRF_ONOFF)
+	.request = common_api_request,
+	.release = common_api_release,
+	.cancel_or_release = common_api_cancel_or_release,
+#endif
+};
+
 DEVICE_DT_DEFINE(DT_COMPAT_GET_ANY_STATUS_OKAY(nordic_nrf_clock_hfclk), clk_init, NULL, &data,
-		 &config, PRE_KERNEL_1, CONFIG_CLOCK_CONTROL_INIT_PRIORITY, &clock_control_api);
+		 &config, PRE_KERNEL_1, CONFIG_CLOCK_CONTROL_INIT_PRIORITY,
+		 &hfclk_clock_control_api);
+#else /* NRF_CLOCK_FEATURE_HFCLK_DIVIDE_PRESENT */
+
+extern struct nrf_clock_control_driver_api common_clock_control_api;
+
+DEVICE_DT_DEFINE(DT_COMPAT_GET_ANY_STATUS_OKAY(nordic_nrf_clock_hfclk), clk_init, NULL, &data,
+		 &config, PRE_KERNEL_1, CONFIG_CLOCK_CONTROL_INIT_PRIORITY,
+		 &common_clock_control_api);
+#endif /* NRF_CLOCK_FEATURE_HFCLK_DIVIDE_PRESENTS */

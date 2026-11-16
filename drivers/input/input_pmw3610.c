@@ -257,7 +257,7 @@ static void pmw3610_motion_handler(const struct device *gpio_dev,
 	struct pmw3610_data *data = CONTAINER_OF(
 			cb, struct pmw3610_data, motion_cb);
 
-	k_work_submit(&data->motion_work);
+	input_work_submit(&data->motion_work);
 }
 
 int pmw3610_set_resolution(const struct device *dev, uint16_t res_cpi)
@@ -561,7 +561,7 @@ static int pmw3610_pm_action(const struct device *dev,
 }
 #endif
 
-#define PMW3610_SPI_MODE (SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | \
+#define PMW3610_SPI_MODE (SPI_OP_MODE_CONTROLLER | SPI_WORD_SET(8) | \
 			  SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_TRANSFER_MSB)
 
 #define PMW3610_INIT(n)								\

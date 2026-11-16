@@ -291,9 +291,17 @@ static int eth_stm32_tx(const struct device *dev, struct net_pkt *pkt)
 	tx_pkt_conf.attributes = HAL_ETH_TX_PKT_CTRL_CRCPAD;
 	tx_pkt_conf.crc_pad_ctrl = HAL_ETH_TX_PKT_CRC_PAD_INSERT;
 	tx_pkt_conf.notify = HAL_ETH_TX_PKT_NOTIFY_ENABLE;
-	tx_pkt_conf.csum_ctrl = IS_ENABLED(CONFIG_ETH_STM32_HW_CHECKSUM)
-					? HAL_ETH_TX_PKT_CSUM_PAYLOAD_HEADER_INSERT
-					: HAL_ETH_TX_PKT_CSUM_DISABLE;
+	/* The MAC computes the ICMPv4 checksum over the field as it is, so a
+	 * packet that carries its transport layer checksum already, a forwarded
+	 * one for example, gets the IPv4 header checksum only.
+	 */
+	if (!IS_ENABLED(CONFIG_ETH_STM32_HW_CHECKSUM)) {
+		tx_pkt_conf.csum_ctrl = HAL_ETH_TX_PKT_CSUM_DISABLE;
+	} else if (net_pkt_is_chksum_done(pkt)) {
+		tx_pkt_conf.csum_ctrl = HAL_ETH_TX_PKT_CSUM_HEADER_INSERT;
+	} else {
+		tx_pkt_conf.csum_ctrl = HAL_ETH_TX_PKT_CSUM_PAYLOAD_HEADER_INSERT;
+	}
 	if (IS_ENABLED(CONFIG_ETH_STM32_HW_CHECKSUM)) {
 		tx_pkt_conf.attributes |= HAL_ETH_TX_PKT_CTRL_CSUM;
 	}
@@ -365,9 +373,6 @@ static enum ethernet_hw_caps eth_stm32_hal_get_capabilities(const struct device 
 #endif
 #if defined(CONFIG_NET_VLAN)
 		| ETHERNET_HW_VLAN
-#endif
-#if defined(CONFIG_NET_LLDP)
-		| ETHERNET_LLDP
 #endif
 		;
 }
@@ -505,15 +510,8 @@ static int eth_initialize(const struct device *dev)
 
 	/* Set up gated and source clocks */
 	for (size_t n = 0; n < cfg->pclken_cnt; n++) {
-		if (IN_RANGE(cfg->pclken[n].bus, STM32_PERIPH_BUS_MIN, STM32_PERIPH_BUS_MAX)) {
-			ret = clock_control_on(DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE),
-					(clock_control_subsys_t)&cfg->pclken[n]);
-		} else {
-			ret = clock_control_configure(DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE),
-					(clock_control_subsys_t)&cfg->pclken[n],
-					NULL);
-		}
-
+		ret = clock_control_on(DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE),
+				       (clock_control_subsys_t)&cfg->pclken[n]);
 		if (ret != 0) {
 			LOG_ERR("Failed to setup ethernet clock #%zu", n);
 			return -EIO;
@@ -581,6 +579,7 @@ static int eth_stm32_hal_set_config(const struct device *dev,
 
 	switch (type) {
 	case ETHERNET_CONFIG_TYPE_MAC_ADDRESS:
+		memcpy(dev_data->mac_addr, config->mac_address.addr, sizeof(dev_data->mac_addr));
 		HAL_ETH_GetConfig(heth, &eth_cfg);
 		memcpy(eth_cfg.mac_addr, dev_data->mac_addr, sizeof(dev_data->mac_addr));
 
@@ -596,7 +595,7 @@ static int eth_stm32_hal_set_config(const struct device *dev,
 	return -ENOTSUP;
 }
 
-static const struct ethernet_api eth_api = {
+static DEVICE_API(ethernet, eth_api) = {
 	.iface_api.init = eth_iface_init,
 	.get_capabilities = eth_stm32_hal_get_capabilities,
 	.get_phy = eth_stm32_hal_get_phy,

@@ -52,9 +52,8 @@ void arch_dcache_disable(void);
  *
  * Flush the whole data cache.
  *
- * @retval 0 If succeeded.
- * @retval -ENOTSUP If not supported.
- * @retval -errno Negative errno for other failures.
+ * @return 0 on success, or a negative errno value on failure.
+ * @retval -ENOTSUP Operation not supported.
  */
 int arch_dcache_flush_all(void);
 
@@ -65,9 +64,8 @@ int arch_dcache_flush_all(void);
  *
  * Invalidate the whole data cache.
  *
- * @retval 0 If succeeded.
- * @retval -ENOTSUP If not supported.
- * @retval -errno Negative errno for other failures.
+ * @return 0 on success, or a negative errno value on failure.
+ * @retval -ENOTSUP Operation not supported.
  */
 int arch_dcache_invd_all(void);
 
@@ -78,9 +76,8 @@ int arch_dcache_invd_all(void);
  *
  * Flush and Invalidate the whole data cache.
  *
- * @retval 0 If succeeded.
- * @retval -ENOTSUP If not supported.
- * @retval -errno Negative errno for other failures.
+ * @return 0 on success, or a negative errno value on failure.
+ * @retval -ENOTSUP Operation not supported.
  */
 int arch_dcache_flush_and_invd_all(void);
 
@@ -101,9 +98,8 @@ int arch_dcache_flush_and_invd_all(void);
  * @param addr Starting address to flush.
  * @param size Range size.
  *
- * @retval 0 If succeeded.
- * @retval -ENOTSUP If not supported.
- * @retval -errno Negative errno for other failures.
+ * @return 0 on success, or a negative errno value on failure.
+ * @retval -ENOTSUP Operation not supported.
  */
 int arch_dcache_flush_range(void *addr, size_t size);
 
@@ -125,9 +121,8 @@ int arch_dcache_flush_range(void *addr, size_t size);
  * @param addr Starting address to invalidate.
  * @param size Range size.
  *
- * @retval 0 If succeeded.
- * @retval -ENOTSUP If not supported.
- * @retval -errno Negative errno for other failures.
+ * @return 0 on success, or a negative errno value on failure.
+ * @retval -ENOTSUP Operation not supported.
  */
 int arch_dcache_invd_range(void *addr, size_t size);
 
@@ -149,9 +144,8 @@ int arch_dcache_invd_range(void *addr, size_t size);
  * @param addr Starting address to flush and invalidate.
  * @param size Range size.
  *
- * @retval 0 If succeeded.
- * @retval -ENOTSUP If not supported.
- * @retval -errno Negative errno for other failures.
+ * @return 0 on success, or a negative errno value on failure.
+ * @retval -ENOTSUP Operation not supported.
  */
 
 int arch_dcache_flush_and_invd_range(void *addr, size_t size);
@@ -159,7 +153,7 @@ int arch_dcache_flush_and_invd_range(void *addr, size_t size);
 #define cache_data_flush_and_invd_range(addr, size) \
 	arch_dcache_flush_and_invd_range(addr, size)
 
-#if defined(CONFIG_DCACHE_LINE_SIZE_DETECT) || defined(__DOXYGEN__)
+#if defined(CONFIG_DCACHE_LINE_SIZE_DETECT_SUPPORT) || defined(__DOXYGEN__)
 
 /**
  *
@@ -168,7 +162,7 @@ int arch_dcache_flush_and_invd_range(void *addr, size_t size);
  * The API is provided to dynamically detect the data cache line size at run
  * time.
  *
- * The function must be implemented only when CONFIG_DCACHE_LINE_SIZE_DETECT is
+ * The function must be implemented only when CONFIG_DCACHE_LINE_SIZE_DETECT_SUPPORT is
  * defined.
  *
  * @retval size Size of the d-cache line.
@@ -178,7 +172,7 @@ size_t arch_dcache_line_size_get(void);
 
 #define cache_data_line_size_get arch_dcache_line_size_get
 
-#endif /* CONFIG_DCACHE_LINE_SIZE_DETECT || __DOXYGEN__ */
+#endif /* CONFIG_DCACHE_LINE_SIZE_DETECT_SUPPORT || __DOXYGEN__ */
 
 #endif /* CONFIG_DCACHE || __DOXYGEN__ */
 
@@ -207,9 +201,8 @@ void arch_icache_disable(void);
  *
  * Flush the whole instruction cache.
  *
- * @retval 0 If succeeded.
- * @retval -ENOTSUP If not supported.
- * @retval -errno Negative errno for other failures.
+ * @return 0 on success, or a negative errno value on failure.
+ * @retval -ENOTSUP Operation not supported.
  */
 int arch_icache_flush_all(void);
 
@@ -220,9 +213,8 @@ int arch_icache_flush_all(void);
  *
  * Invalidate the whole instruction cache.
  *
- * @retval 0 If succeeded.
- * @retval -ENOTSUP If not supported.
- * @retval -errno Negative errno for other failures.
+ * @return 0 on success, or a negative errno value on failure.
+ * @retval -ENOTSUP Operation not supported.
  */
 int arch_icache_invd_all(void);
 
@@ -233,9 +225,8 @@ int arch_icache_invd_all(void);
  *
  * Flush and Invalidate the whole instruction cache.
  *
- * @retval 0 If succeeded.
- * @retval -ENOTSUP If not supported.
- * @retval -errno Negative errno for other failures.
+ * @return 0 on success, or a negative errno value on failure.
+ * @retval -ENOTSUP Operation not supported.
  */
 int arch_icache_flush_and_invd_all(void);
 
@@ -256,9 +247,8 @@ int arch_icache_flush_and_invd_all(void);
  * @param addr Starting address to flush.
  * @param size Range size.
  *
- * @retval 0 If succeeded.
- * @retval -ENOTSUP If not supported.
- * @retval -errno Negative errno for other failures.
+ * @return 0 on success, or a negative errno value on failure.
+ * @retval -ENOTSUP Operation not supported.
  */
 int arch_icache_flush_range(void *addr, size_t size);
 
@@ -280,9 +270,8 @@ int arch_icache_flush_range(void *addr, size_t size);
  * @param addr Starting address to invalidate.
  * @param size Range size.
  *
- * @retval 0 If succeeded.
- * @retval -ENOTSUP If not supported.
- * @retval -errno Negative errno for other failures.
+ * @return 0 on success, or a negative errno value on failure.
+ * @retval -ENOTSUP Operation not supported.
  */
 int arch_icache_invd_range(void *addr, size_t size);
 
@@ -304,16 +293,15 @@ int arch_icache_invd_range(void *addr, size_t size);
  * @param addr Starting address to flush and invalidate.
  * @param size Range size.
  *
- * @retval 0 If succeeded.
- * @retval -ENOTSUP If not supported.
- * @retval -errno Negative errno for other failures.
+ * @return 0 on success, or a negative errno value on failure.
+ * @retval -ENOTSUP Operation not supported.
  */
 int arch_icache_flush_and_invd_range(void *addr, size_t size);
 
 #define cache_instr_flush_and_invd_range(addr, size) \
 	arch_icache_flush_and_invd_range(addr, size)
 
-#if defined(CONFIG_ICACHE_LINE_SIZE_DETECT) || defined(__DOXYGEN__)
+#if defined(CONFIG_ICACHE_LINE_SIZE_DETECT_SUPPORT) || defined(__DOXYGEN__)
 
 /**
  *
@@ -322,7 +310,7 @@ int arch_icache_flush_and_invd_range(void *addr, size_t size);
  * The API is provided to dynamically detect the instruction cache line size at
  * run time.
  *
- * The function must be implemented only when CONFIG_ICACHE_LINE_SIZE_DETECT is
+ * The function must be implemented only when CONFIG_ICACHE_LINE_SIZE_DETECT_SUPPORT is
  * defined.
  *
  * @retval size Size of the d-cache line.
@@ -333,7 +321,7 @@ size_t arch_icache_line_size_get(void);
 
 #define cache_instr_line_size_get arch_icache_line_size_get
 
-#endif /* CONFIG_ICACHE_LINE_SIZE_DETECT || __DOXYGEN__ */
+#endif /* CONFIG_ICACHE_LINE_SIZE_DETECT_SUPPORT || __DOXYGEN__ */
 
 #endif /* CONFIG_ICACHE || __DOXYGEN__ */
 

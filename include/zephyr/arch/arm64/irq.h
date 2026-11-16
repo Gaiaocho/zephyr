@@ -38,6 +38,11 @@ GTEXT(z_soc_irq_eoi)
 extern void arch_irq_enable(unsigned int irq);
 extern void arch_irq_disable(unsigned int irq);
 extern int arch_irq_is_enabled(unsigned int irq);
+#if defined(CONFIG_ARCH_HAS_IRQ_PENDING_OPS)
+extern void arch_irq_clear_pending(unsigned int irq);
+extern void arch_irq_set_pending(unsigned int irq);
+extern bool arch_irq_is_pending(unsigned int irq);
+#endif
 
 /* internal routine documented in C file, needed by IRQ_CONNECT() macro */
 extern void z_arm64_irq_priority_set(unsigned int irq, unsigned int prio,
@@ -61,12 +66,61 @@ void z_soc_irq_priority_set(
 unsigned int z_soc_irq_get_active(void);
 void z_soc_irq_eoi(unsigned int irq);
 
+#if defined(CONFIG_ARCH_HAS_IRQ_PENDING_OPS)
+void z_soc_irq_clear_pending(unsigned int irq);
+void z_soc_irq_set_pending(unsigned int irq);
+bool z_soc_irq_is_pending(unsigned int irq);
+#endif
+
 #define arch_irq_enable(irq)		z_soc_irq_enable(irq)
 #define arch_irq_disable(irq)		z_soc_irq_disable(irq)
 #define arch_irq_is_enabled(irq)	z_soc_irq_is_enabled(irq)
 
+#if defined(CONFIG_ARCH_HAS_IRQ_PENDING_OPS)
+#define arch_irq_clear_pending(irq)	z_soc_irq_clear_pending(irq)
+#define arch_irq_set_pending(irq)	z_soc_irq_set_pending(irq)
+#define arch_irq_is_pending(irq)	z_soc_irq_is_pending(irq)
+#endif
+
 #define z_arm64_irq_priority_set(irq, prio, flags)	\
 	z_soc_irq_priority_set(irq, prio, flags)
+
+/*
+ * SMP IPI hooks between arch/arm64/core/smp.c and the SoC layer. An SMP
+ * SoC must supply the soc_* transport and connect the arch-owned
+ * handlers to its IPI interrupt; a missing hook is a link error. The
+ * FPU hooks are only used with CONFIG_FPU_SHARING.
+ */
+
+/**
+ * @brief Raise a scheduler IPI on a core.
+ *
+ * @param target_mpidr MPIDR of the target core.
+ */
+void soc_sched_ipi(uint64_t target_mpidr);
+
+/**
+ * @brief Handle a scheduler IPI on the current core.
+ *
+ * @param unused Not used, for connecting as an ISR.
+ */
+void z_arm64_sched_ipi_handler(const void *unused);
+
+/**
+ * @brief Raise an FPU flush IPI on a core.
+ *
+ * @param target_mpidr MPIDR of the target core.
+ */
+void soc_flush_fpu_ipi(uint64_t target_mpidr);
+
+/**
+ * @brief Handle an FPU flush IPI on the current core.
+ *
+ * Leaves IRQs masked, so it must be the last thing the ISR does.
+ *
+ * @param unused Not used, for connecting as an ISR.
+ */
+void z_arm64_flush_fpu_ipi_handler(const void *unused);
 
 #endif /* !CONFIG_ARM_CUSTOM_INTERRUPT_CONTROLLER */
 

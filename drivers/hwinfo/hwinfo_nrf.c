@@ -23,14 +23,21 @@
 #include <hal/nrf_ficr.h>
 #endif
 
-struct nrf_uid {
-	uint32_t id[2];
-};
+#if defined(CONFIG_HAS_IRONSIDE_SE)
+#include <ironside/se/boot_report.h>
+#if defined(IRONSIDE_SE_APPLICATION_BOOT_REPORT_ADDRESS) && \
+	(TARGET_IRONSIDE_SE_VERSION > IRONSIDE_SE_V23_0_2_17)
+#define IRONSIDE_BOOT_REPORT \
+	(const struct ironside_se_boot_report *)IRONSIDE_SE_APPLICATION_BOOT_REPORT_ADDRESS
+#endif
+#endif
 
 ssize_t z_impl_hwinfo_get_device_id(uint8_t *buffer, size_t length)
 {
-	struct nrf_uid dev_id;
+#if NRF_FICR_HAS_DEVICE_ID || NRF_FICR_HAS_INFO_DEVICE_ID || \
+	NRF_FICR_HAS_DEVICE_ADDR || NRF_FICR_HAS_BLE_ADDR
 	uint32_t buf[2];
+	uint32_t dev_id[2];
 
 #if NRF_FICR_HAS_DEVICE_ID || NRF_FICR_HAS_INFO_DEVICE_ID
 	/* DEVICEID is accessible, use this */
@@ -40,7 +47,7 @@ ssize_t z_impl_hwinfo_get_device_id(uint8_t *buffer, size_t length)
 	buf[0] = nrf_ficr_deviceid_get(NRF_FICR, 0);
 	buf[1] = nrf_ficr_deviceid_get(NRF_FICR, 1);
 #endif
-#elif NRF_FICR_HAS_DEVICE_ADDR || NRF_FICR_HAS_BLE_ADDR
+#else
 	/* DEVICEID is not accessible, use device/Bluetooth LE address instead.
 	 * Assume that it is always accessible from the non-secure image.
 	 */
@@ -52,27 +59,31 @@ ssize_t z_impl_hwinfo_get_device_id(uint8_t *buffer, size_t length)
 	 */
 	buf[1] |= (nrf_ficr_er_get(NRF_FICR, 0) & 0xFF) << 16;
 	buf[1] |= (nrf_ficr_ir_get(NRF_FICR, 0) & 0xFF) << 24;
-#elif NRF_FICR_HAS_NFC_TAGHEADER_ARRAY
-	/* DEVICEID is not accessible, use NFCID instead.
-	 * Assume that it is always accessible from the non-secure image.
-	 * Skip TAGHEADER[0] as it always contain Manufacturer ID.
-	 */
-	buf[0] = nrf_ficr_nfc_tagheader_get(NRF_FICR, 1);
-	buf[1] = nrf_ficr_nfc_tagheader_get(NRF_FICR, 2);
+#endif /* NRF_FICR_HAS_INFO_DEVICE_ID || NRF_FICR_HAS_INFO_DEVICE_ID */
+
+	dev_id[0] = sys_cpu_to_be32(buf[1]);
+	dev_id[1] = sys_cpu_to_be32(buf[0]);
+
+	if (length > sizeof(dev_id)) {
+		length = sizeof(dev_id);
+	}
+
+	memcpy(buffer, dev_id, length);
+
+	return length;
+#elif defined(IRONSIDE_BOOT_REPORT)
+	/* DEVICEID is not accessible, use Ironside SE boot report instead. */
+	const struct ironside_se_boot_report *report = IRONSIDE_BOOT_REPORT;
+
+	if (length > sizeof(report->device_info_uuid)) {
+		length = sizeof(report->device_info_uuid);
+	}
+	memcpy(buffer, report->device_info_uuid, length);
+
+	return length;
 #else
 #error "No suitable source for hwinfo device_id generation"
 #endif
-
-	dev_id.id[0] = sys_cpu_to_be32(buf[1]);
-	dev_id.id[1] = sys_cpu_to_be32(buf[0]);
-
-	if (length > sizeof(dev_id.id)) {
-		length = sizeof(dev_id.id);
-	}
-
-	memcpy(buffer, dev_id.id, length);
-
-	return length;
 }
 
 #if RESET_CAUSE_AVAILABLE
@@ -83,6 +94,8 @@ ssize_t z_impl_hwinfo_get_device_id(uint8_t *buffer, size_t length)
 #define REASON_SOFTWARE (NRFX_RESET_REASON_SREQ_MASK | NRFX_RESET_REASON_LOCAL_SREQ_MASK)
 #define REASON_WATCHDOG	\
 	(NRFX_RESET_REASON_DOG_MASK | \
+	 NRFX_RESET_REASON_SECWDT0_MASK | \
+	 NRFX_RESET_REASON_SECWDT1_MASK | \
 	 COND_CODE_1(NRFX_RESET_REASON_HAS_LOCAL_DOG, (NRFX_RESET_REASON_LOCAL_DOG_MASK), (0)) | \
 	 COND_CODE_1(NRFX_RESET_REASON_HAS_LOCAL_DOG1, (NRFX_RESET_REASON_LOCAL_DOG1_MASK), (0)) | \
 	 COND_CODE_1(NRFX_RESET_REASON_HAS_LOCAL_DOG0, (NRFX_RESET_REASON_LOCAL_DOG0_MASK), (0)))
@@ -190,14 +203,14 @@ int z_impl_hwinfo_get_reset_cause(uint32_t *cause)
 	}
 
 #endif
-#if defined(NRFX_RESET_REASON_TAMPC_MASK)
-	if (reason & NRFX_RESET_REASON_TAMPC_MASK) {
+#if NRFX_RESET_REASON_HAS_SECTAMPER
+	if (reason & NRFX_RESET_REASON_SECTAMPER_MASK) {
 		flags |= RESET_SECURITY;
 	}
 #endif
-#if defined(NRFX_RESET_REASON_SECTAMPER_MASK)
-	if (reason & NRFX_RESET_REASON_SECTAMPER_MASK) {
-		flags |= RESET_SECURITY;
+#if defined(NRF_RESETINFO)
+	if (reason & NRFX_RESET_REASON_POR_MASK) {
+		flags |= RESET_POR;
 	}
 #endif
 
@@ -222,13 +235,13 @@ int z_impl_hwinfo_get_supported_reset_cause(uint32_t *supported)
 		      | RESET_SOFTWARE
 		      | RESET_CPU_LOCKUP
 		      | RESET_LOW_POWER_WAKE
-#if NRFX_RESET_REASON_HAS_VBUS
+#if NRFX_RESET_REASON_HAS_VBUS || defined(NRF_RESETINFO)
 		      | RESET_POR
 #endif
 #if NRFX_RESET_REASON_HAS_GRTC
 		      | RESET_CLOCK
 #endif
-#if defined(NRFX_RESET_REASON_TAMPC_MASK) || defined(NRFX_RESET_REASON_SECTAMPER_MASK)
+#if NRFX_RESET_REASON_HAS_SECTAMPER
 		      | RESET_SECURITY
 #endif
 		      | RESET_DEBUG);

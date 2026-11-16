@@ -16,13 +16,17 @@ menuconfig WIFI_ST67W611M1
 	select SPI_STM32_DMA if SOC_FAMILY_STM32 && $(DT_STM32_SPI_HAS_DMA)
 	select NET_L2_ETHERNET # Wifi driver is defined as an Ethernet interface
 	select NET_L2_WIFI_MGMT
-	select WIFI_USE_NATIVE_NETWORKING # Set net_wifi_mgmt_offload as an ethernet_api
+	select WIFI_USE_NATIVE_NETWORKING # Set the Wi-Fi driver API as an ethernet_driver_api
 
 if WIFI_ST67W611M1
 
 config ST67W611M1_SCAN_RESULT_MAX_NUMBER
 	int "Max number of scan results"
 	default 12
+
+config ST67W611M1_WIFI_STA_SAP_MODE
+	bool "SoftAP mode on top of STA mode"
+	default y if WIFI_USAGE_MODE_STA_AP
 
 config ST67W611M1_WORKQ_THREAD_PRIORITY
 	int "Priority of the work queue thread"
@@ -77,7 +81,34 @@ config ST67W611M1_WIFI_AUTO_CONNECT
 	  the Wi-Fi management API. The setting is only written when it differs
 	  from the module's current value, as the module persists it to flash.
 
+config ST67W611M1_LOW_POWER
+	bool "Low power support"
+	default y
+	help
+	  Configure DTIM based sleep at init and provide the power save
+	  and TWT Wi-Fi management operations. Disable if the module
+	  firmware does not support low power.
+
+config ST67W611M1_SHELL
+	bool "Shell commands"
+	depends on SHELL
+	help
+	  Add the "st67" shell command. "st67 atcmd <AT command>" sends a
+	  raw AT command to the module and prints the reply, for debugging
+	  and for querying module state the driver does not expose.
+
+	  Reply lines the driver already handles (such as +CWJAP:,
+	  +CWSTATE: or +CWCOUNTRY:) go to the driver and are not printed.
+	  Commands that change the module state (such as connecting) bypass
+	  the driver, so its state can get out of sync with the module.
+
 configdefault NET_MGMT_EVENT_STACK_SIZE
 	default 2048
+
+configdefault NET_IF_MAX_IPV4_COUNT
+	default 2 if ST67W611M1_WIFI_STA_SAP_MODE
+
+configdefault NET_IF_MAX_IPV6_COUNT
+	default 2 if ST67W611M1_WIFI_STA_SAP_MODE
 
 endif # WIFI_ST67W611M1

@@ -1,9 +1,12 @@
 /*
- * SPDX-FileCopyrightText: <text>Copyright (c) 2026 Infineon Technologies AG,
- * or an affiliate of Infineon Technologies AG. All rights reserved.</text>
+ * SPDX-FileCopyrightText: Copyright (c) 2026 Infineon Technologies AG,
+ * SPDX-FileCopyrightText: or an affiliate of Infineon Technologies AG. All rights reserved.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+
+#ifndef ZEPHYR_INCLUDE_DT_BINDINGS_CLOCK_IFX_CLOCK_SOURCE_COMMON_H_
+#define ZEPHYR_INCLUDE_DT_BINDINGS_CLOCK_IFX_CLOCK_SOURCE_COMMON_H_
 
 #define CLK_SOURCE_IHO
 #define CLK_SOURCE_PILO
@@ -33,6 +36,7 @@
 #define IFX_DPLL250_0     23 /*!< 250MHz Digital Phase-Locked Loop Clock 0 */
 #define IFX_DPLL250_1     24 /*!< 250MHz Digital Phase-Locked Loop Clock 1 */
 #define IFX_DPLL500       25 /*!< 500MHz Digital Phase-Locked Loop Clock */
+#define IFX_HPOSC         26 /*!< High Precision Oscillator Input Clock */
 
 #define IFX_CLK_HF_NO_DIVIDE    0  /**< don't divide clkHf */
 #define IFX_CLK_HF_DIVIDE_BY_2  1  /**< divide clkHf by 2 */
@@ -102,3 +106,5 @@
 #define IFX_RSC_UDB     29 /*!< UDB Array */
 #define IFX_RSC_USB     30 /*!< USB communication block */
 #define IFX_RSC_INVALID 31 /*!< Placeholder for invalid type */
+
+#endif /* ZEPHYR_INCLUDE_DT_BINDINGS_CLOCK_IFX_CLOCK_SOURCE_COMMON_H_ */

@@ -14,7 +14,7 @@ logical Bluetooth devices.
 The shell allows the creation of multiple identities, to a maximum that is set by the Kconfig symbol
 :kconfig:option:`CONFIG_BT_ID_MAX`. To create a new identity, use :code:`bt id-create` command. You
 can then use it by selecting it with its ID :code:`bt id-select <id>`. Finally, you can list all the
-available identities with :code:`id-show`.
+available identities with :code:`bt id-show`.
 
 Scan for devices
 ****************
@@ -29,20 +29,20 @@ Here is an example of what you can expect:
 
         uart:~$ bt scan on
         Bluetooth active scan enabled
-        [DEVICE]: CB:01:1A:2D:6E:AE (random), AD evt type 0, RSSI -78  C:1 S:1 D:0 SR:0 E:0 Prim: LE 1M, Secn: No packets, Interval: 0x0000 (0 us), SID: 0xff
-        [DEVICE]: 20:C2:EE:59:85:5B (random), AD evt type 3, RSSI -62  C:0 S:0 D:0 SR:0 E:0 Prim: LE 1M, Secn: No packets, Interval: 0x0000 (0 us), SID: 0xff
-        [DEVICE]: E3:72:76:87:2F:E8 (random), AD evt type 3, RSSI -74  C:0 S:0 D:0 SR:0 E:0 Prim: LE 1M, Secn: No packets, Interval: 0x0000 (0 us), SID: 0xff
-        [DEVICE]: 1E:19:25:8A:CB:84 (random), AD evt type 3, RSSI -67  C:0 S:0 D:0 SR:0 E:0 Prim: LE 1M, Secn: No packets, Interval: 0x0000 (0 us), SID: 0xff
-        [DEVICE]: 26:42:F3:D5:A0:86 (random), AD evt type 3, RSSI -73  C:0 S:0 D:0 SR:0 E:0 Prim: LE 1M, Secn: No packets, Interval: 0x0000 (0 us), SID: 0xff
-        [DEVICE]: 0C:61:D1:B9:5D:9E (random), AD evt type 3, RSSI -87  C:0 S:0 D:0 SR:0 E:0 Prim: LE 1M, Secn: No packets, Interval: 0x0000 (0 us), SID: 0xff
-        [DEVICE]: 20:C2:EE:59:85:5B (random), AD evt type 3, RSSI -66  C:0 S:0 D:0 SR:0 E:0 Prim: LE 1M, Secn: No packets, Interval: 0x0000 (0 us), SID: 0xff
-        [DEVICE]: 25:3F:7A:EE:0F:55 (random), AD evt type 3, RSSI -83  C:0 S:0 D:0 SR:0 E:0 Prim: LE 1M, Secn: No packets, Interval: 0x0000 (0 us), SID: 0xff
+        [DEVICE]: R:CB:01:1A:2D:6E:AE, AD evt type 0, RSSI -78  C:1 S:1 D:0 SR:0 E:0 Prim: LE 1M, Secn: No packets, Interval: 0x0000 (0 us), SID: 0xff
+        [DEVICE]: R:20:C2:EE:59:85:5B, AD evt type 3, RSSI -62  C:0 S:0 D:0 SR:0 E:0 Prim: LE 1M, Secn: No packets, Interval: 0x0000 (0 us), SID: 0xff
+        [DEVICE]: R:E3:72:76:87:2F:E8, AD evt type 3, RSSI -74  C:0 S:0 D:0 SR:0 E:0 Prim: LE 1M, Secn: No packets, Interval: 0x0000 (0 us), SID: 0xff
+        [DEVICE]: R:1E:19:25:8A:CB:84, AD evt type 3, RSSI -67  C:0 S:0 D:0 SR:0 E:0 Prim: LE 1M, Secn: No packets, Interval: 0x0000 (0 us), SID: 0xff
+        [DEVICE]: R:26:42:F3:D5:A0:86, AD evt type 3, RSSI -73  C:0 S:0 D:0 SR:0 E:0 Prim: LE 1M, Secn: No packets, Interval: 0x0000 (0 us), SID: 0xff
+        [DEVICE]: R:0C:61:D1:B9:5D:9E, AD evt type 3, RSSI -87  C:0 S:0 D:0 SR:0 E:0 Prim: LE 1M, Secn: No packets, Interval: 0x0000 (0 us), SID: 0xff
+        [DEVICE]: R:20:C2:EE:59:85:5B, AD evt type 3, RSSI -66  C:0 S:0 D:0 SR:0 E:0 Prim: LE 1M, Secn: No packets, Interval: 0x0000 (0 us), SID: 0xff
+        [DEVICE]: R:25:3F:7A:EE:0F:55, AD evt type 3, RSSI -83  C:0 S:0 D:0 SR:0 E:0 Prim: LE 1M, Secn: No packets, Interval: 0x0000 (0 us), SID: 0xff
         uart:~$ bt scan off
         Scan successfully stopped
 
 As you can see, this can lead to a high number of results. To reduce that number and easily find a
 specific device, you can enable scan filters. There are four types of filters: by name, by RSSI, by
-address and by periodic advertising interval. To apply a filter, use the :code:`bt scan-set-filter`
+address and by periodic advertising interval. To apply a filter, use the :code:`bt scan-filter-set`
 command followed by the type of filters. You can add multiple filters by using the commands again.
 
 For example, if you want to look only for devices with the name *test shell*:
@@ -69,6 +69,13 @@ will ask the advertisers for more information by sending a *scan request* packet
 can create a *passive scanner* by using the :code:`bt scan passive` command, so the scanner will not
 ask the advertiser for more information.
 
+With :kconfig:option:`CONFIG_BT_SCAN_EXT_FILTER_POLICY` enabled, the
+:code:`bt scan --ext-filter-policy on` command starts the scanner with the extended scanner filter
+policy. The Controller then also reports directed advertisements whose target address is a
+resolvable private address it was unable to resolve. The target address of a directed advertisement
+is printed on its own line. This requires a Controller that supports the Extended Scanner Filter
+Policies, and the command fails otherwise.
+
 Connecting to a device
 **********************
 
@@ -79,9 +86,9 @@ Here is an example:
 
 .. code-block:: console
 
-        uart:~$ bt connect 52:84:F6:BD:CE:48 random
+        uart:~$ bt connect R:52:84:F6:BD:CE:48
         Connection pending
-        Connected: 52:84:F6:BD:CE:48 (random)
+        Connected: R:52:84:F6:BD:CE:48
         Remote LMP version 5.3 (0x0c) subversion 0xffff manufacturer 0x05f1
         LE Features: 0x000000000001412f
         LE PHY updated: TX PHY LE 2M, RX PHY LE 2M
@@ -91,7 +98,7 @@ Here is an example:
 You can list the active connections of the shell using the :code:`bt connections` command. The shell
 maximum number of connections is defined by :kconfig:option:`CONFIG_BT_MAX_CONN`. You can disconnect
 from a connection with the
-:code:`bt disconnect <address: XX:XX:XX:XX:XX:XX> <type: (public|random)>` command.
+:code:`bt disconnect <address: P:XX:XX:XX:XX:XX:XX or R:XX:XX:XX:XX:XX:XX>` command.
 
 .. note::
 
@@ -172,7 +179,7 @@ privacy-enabled and supports address resolution of the target address in directe
 
 .. code-block:: console
 
-        uart:~$ bt adv-create conn-scan directed D7:54:03:CE:F3:B4 random low dir-rpa
+        uart:~$ bt adv-create conn-scan directed R:D7:54:03:CE:F3:B4 low dir-rpa
         Created adv id: 0, adv: 0x20002348
 
 After that, you can start the advertiser and then the target device will be able to reconnect.
@@ -265,7 +272,7 @@ Here is a simple example demonstrating the usage of EAD:
                         Received encrypted advertising data will now be decrypted using provided key materials.
                         uart:~$ bt scan on
                         Bluetooth active scan enabled
-                        [DEVICE]: 68:49:30:68:49:30 (random), AD evt type 5, RSSI -59   shell C:1 S:0 D:0 SR:0 E:1 Prim: LE 1M, Secn: LE 2M, Interval: 0x0000 (0 us), SID: 0x0
+                        [DEVICE]: R:68:49:30:68:49:30, AD evt type 5, RSSI -59   shell C:1 S:0 D:0 SR:0 E:1 Prim: LE 1M, Secn: LE 2M, Interval: 0x0000 (0 us), SID: 0x0
                                 [SCAN DATA START - EXT_ADV]
                                 Type 0x09:    shell
                                 Type 0x31: Encrypted Advertising Data: 0xe2, 0x17, 0xed, 0x04, 0xe7, 0x02, 0x1d, 0xc9, 0x40, 0x07, uart:~0x18, 0x90, 0x6c, 0x4b, 0xfe, 0x34, 0xad
@@ -284,23 +291,23 @@ connect to those addresses automatically. Here is how to do it:
 
 .. code-block:: console
 
-        uart:~$ bt fal-add 47:38:76:EA:29:36 random
-        uart:~$ bt fal-add 66:C8:80:2A:05:73 random
+        uart:~$ bt fal-add R:47:38:76:EA:29:36
+        uart:~$ bt fal-add R:66:C8:80:2A:05:73
         uart:~$ bt fal-connect on
 
 The shell will then connect to the first available device. In the example, if both devices are
 advertising at the same time, we will connect to the first address added to the list.
 
-The Filter Accept List can also be used for scanning or advertising by using the option :code:`fal`.
-For example, if we want to scan for a bunch of selected addresses, we can set up a Filter Accept
-List:
+The Filter Accept List can also be used for scanning with the :code:`--fal` option of
+:code:`bt scan`, or for advertising with the :code:`fal` option of :code:`bt advertise`. For
+example, if we want to scan for a bunch of selected addresses, we can set up a Filter Accept List:
 
 .. code-block:: console
 
-        uart:~$ bt fal-add 65:4B:9E:83:AF:73 random
-        uart:~$ bt fal-add 73:72:82:B4:8F:B9 random
-        uart:~$ bt fal-add 5D:85:50:1C:72:64 random
-        uart:~$ bt scan on fal
+        uart:~$ bt fal-add R:65:4B:9E:83:AF:73
+        uart:~$ bt fal-add R:73:72:82:B4:8F:B9
+        uart:~$ bt fal-add R:5D:85:50:1C:72:64
+        uart:~$ bt scan --fal on
 
 You should see only those three addresses reported by the scanner.
 
@@ -329,5 +336,6 @@ can make the shell not bondable using :code:`bt bondable off`. You can list all 
 paired with using the command :code:`bt bonds`.
 
 The maximum number of paired devices is set using :kconfig:option:`CONFIG_BT_MAX_PAIRED`. You can
-remove a paired device using :code:`bt clear <address: XX:XX:XX:XX:XX:XX> <type: (public|random)>`
+remove a paired device using
+:code:`bt clear <address: P:XX:XX:XX:XX:XX:XX or R:XX:XX:XX:XX:XX:XX>`
 or remove all paired devices with the command :code:`bt clear all`.

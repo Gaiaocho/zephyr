@@ -49,13 +49,13 @@
 #else
 #define MDM_CHAT_ARGV_BUFFER_SIZE 32
 #endif /* CONFIG_HL78XX_GNSS */
-#ifdef CONFIG_MODEM_HL78XX_RAT_NBNTN
+#ifdef CONFIG_MODEM_HL78XX_NTN_SUPPORT
 
 #define NTN_POSITION_METHOD_IGSS         "IGSS"
 #define NTN_POSITION_METHOD_MANUAL       "MANUAL"
 #define NTN_POSITION_METHOD_TEXT_MAX_LEN sizeof(NTN_POSITION_METHOD_MANUAL)
 
-#endif /* CONFIG_MODEM_HL78XX_RAT_NBNTN */
+#endif /* CONFIG_MODEM_HL78XX_NTN_SUPPORT */
 #define MDM_MAX_DATA_LENGTH       CONFIG_MODEM_HL78XX_UART_BUFFER_SIZES
 #define MDM_MAX_SOCKETS           CONFIG_MODEM_HL78XX_NUM_SOCKETS
 #define MDM_MAX_PDP_CONTEXTS      CONFIG_MODEM_HL78XX_MAX_PDP_CONTEXTS
@@ -210,9 +210,9 @@ enum hl78xx_event {
 	/* Modem unexpected restart event */
 	MODEM_HL78XX_EVENT_MDM_RESTART,
 	MODEM_HL78XX_EVENT_SOCKET_READY,
-#ifdef CONFIG_MODEM_HL78XX_RAT_NBNTN
+#ifdef CONFIG_MODEM_HL78XX_NTN_SUPPORT
 	MODEM_HL78XX_EVENT_NTN_POSREQ,
-#endif /* CONFIG_MODEM_HL78XX_RAT_NBNTN */
+#endif /* CONFIG_MODEM_HL78XX_NTN_SUPPORT */
 	MODEM_HL78XX_EVENT_PHONE_FUNCTIONALITY_CHANGED,
 #ifdef CONFIG_HL78XX_GNSS
 	MODEM_HL78XX_EVENT_GNSS_START_REQUESTED,
@@ -317,6 +317,18 @@ struct hl78xx_power_down_status {
 	enum power_down_event current;
 	enum power_down_event previous;
 	bool is_power_down_requested;
+	/** A power down has been announced and owns the state machine.
+	 *
+	 * Set when the power down work runs, cleared once the modem is off.
+	 * Paths that would otherwise start fresh network activity check this so
+	 * they do not compete with the shutdown for the command interface.
+	 */
+	bool shutdown_pending;
+	/** The PDP activation of the carrier-on failed while a power down was
+	 * pending and was left to it. An aborted power down hands the failure
+	 * back to the state machine.
+	 */
+	bool pdp_activation_held;
 };
 #endif /* CONFIG_MODEM_HL78XX_POWER_DOWN */
 
@@ -402,15 +414,24 @@ struct modem_identity {
 struct hl78xx_phone_functionality_work {
 	enum hl78xx_phone_functionality functionality;
 	bool in_progress;
+	/* True only while `functionality` reflects a value the modem itself
+	 * confirmed in this power session (a +CFUN response, or an OK to an
+	 * AT+CFUN command). Cleared at every power boundary: the modem boots
+	 * CFUN=1 unconfigured regardless of what was last commanded, and some
+	 * firmware persists CFUN=4 across CPWROFF, so a cached value from a
+	 * previous session is a guess either way. Consumers that shortcut on
+	 * `functionality` must check this first and re-verify when false.
+	 */
+	bool valid;
 };
-#ifdef CONFIG_MODEM_HL78XX_RAT_NBNTN
+#ifdef CONFIG_MODEM_HL78XX_NTN_SUPPORT
 
 struct ntn_rat_state {
 	char pos_mode[NTN_POSITION_METHOD_TEXT_MAX_LEN];
 	bool is_dynamic;
 };
 
-#endif /* CONFIG_MODEM_HL78XX_RAT_NBNTN */
+#endif /* CONFIG_MODEM_HL78XX_NTN_SUPPORT */
 
 struct hl78xx_modem_boot_status {
 	bool is_booted_previously;
@@ -505,6 +526,15 @@ struct hl78xx_low_power_status {
 #ifdef CONFIG_MODEM_HL78XX_PSM
 	struct hl78xx_psm_status psmev;
 	bool awaiting_psm_confirmation;
+	/* The confirmation window replaced a pending carrier-on timer: the
+	 * deferred restore, the DNS setup or a retry of either, due again if
+	 * the window ends with the modem registered.
+	 */
+	bool psm_window_displaced_step;
+	/* A deregistration report moved the window's deadline after the window
+	 * had expired: the expiry still queued is void, not a displaced step.
+	 */
+	bool psm_window_expiry_voided;
 #endif /* CONFIG_MODEM_HL78XX_PSM */
 
 #ifdef CONFIG_MODEM_HL78XX_POWER_DOWN
@@ -517,6 +547,14 @@ struct hl78xx_low_power_status {
 #endif /* CONFIG_MODEM_HL78XX_EDRX */
 
 	bool restore_pending;
+	/* CARRIER_OFF removed the interface addresses and the DNS state. The
+	 * next carrier-on restores them whatever the wake classification says:
+	 * the modem may have kept its context, the host has not. Cleared once
+	 * the DNS setup that follows CGCONTRDP has completed, so a sleep entry
+	 * that interrupts the deferred restore, or the DNS setup behind it,
+	 * leaves it due.
+	 */
+	bool host_config_lost;
 };
 #endif /* CONFIG_MODEM_HL78XX_LOW_POWER_MODE */
 
@@ -527,9 +565,9 @@ struct hl78xx_script_recovery_rule;
 
 struct hl78xx_script_failure {
 	const struct hl78xx_script_recovery_rule *recovery_rule;
+	const struct modem_chat_script_chat *script_chat;
 	enum modem_chat_script_result result;
 	enum hl78xx_state origin_state;
-	uint16_t script_chat_index;
 	bool valid;
 };
 
@@ -539,7 +577,7 @@ typedef int (*hl78xx_script_recovery_action_t)(struct hl78xx_data *data,
 struct hl78xx_script_recovery_rule {
 	enum hl78xx_state failed_state;
 	const char *failed_request;
-	uint16_t failed_script_chat_index;
+	const struct modem_chat_script_chat *failed_script_chat;
 	uint32_t result_mask;
 	hl78xx_script_recovery_action_t action;
 	/* State whose specified event confirms full recovery. */
@@ -575,14 +613,23 @@ struct modem_status {
 	struct hl78xx_phone_functionality_work phone_functionality;
 	struct hl78xx_restart_status restart;
 	struct apn_state apn;
+	/* CARRIER_OFF was entered for a registration loss: its exit waits for
+	 * the modem in AWAIT_REGISTERED even when the registration came back
+	 * during the wait, instead of re-running the GPRS enable.
+	 */
+	bool carrier_off_registration_loss;
+	/* SLEEP armed the wake settling timer: its timeout reopens the UART. A
+	 * timeout the previous state queued before it left is not that one.
+	 */
+	bool sleep_wake_timer_armed;
 
 #ifdef CONFIG_MODEM_HL78XX_AIRVANTAGE
 	struct hl78xx_wdsi_status wdsi;
 #endif /* CONFIG_MODEM_HL78XX_AIRVANTAGE */
 
-#ifdef CONFIG_MODEM_HL78XX_RAT_NBNTN
+#ifdef CONFIG_MODEM_HL78XX_NTN_SUPPORT
 	struct ntn_rat_state ntn_rat;
-#endif /* CONFIG_MODEM_HL78XX_RAT_NBNTN */
+#endif /* CONFIG_MODEM_HL78XX_NTN_SUPPORT */
 
 	struct hl78xx_modem_uart_status uart;
 
@@ -710,6 +757,13 @@ struct hl78xx_data {
 	struct hl78xx_devices devices;
 
 	struct kselacq_syntax kselacq_data;
+	/**
+	 * When set, hl78xx_rat_cfg() must not re-apply the configured Auto-RAT
+	 * PRL over a deliberately cleared one. The application sets this while
+	 * the modem is being moved to NB-NTN, where the PRL is cleared on
+	 * purpose and must survive the restart that latches the RAT change.
+	 */
+	bool autorat_inhibit;
 	struct hl78xx_runtime_band runtime_band;
 	struct hl78xx_at_cmd_capture_ctx at_cmd_capture;
 
@@ -938,13 +992,6 @@ struct hl78xx_variant_ops {
 	void (*on_kcellmeas_ready)(struct hl78xx_data *data);
 
 	/**
-	 * @brief Handle pending GNSS mode request on CARRIER_ON entry.
-	 *
-	 * @return true if the variant handled routing and the caller should return.
-	 */
-	bool (*carrier_on_gnss_pending)(struct hl78xx_data *data);
-
-	/**
 	 * @brief Handle GNSS mode enter request while low power mode is enabled.
 	 *
 	 * @return true if the variant handled the request and caller should return.
@@ -976,6 +1023,23 @@ struct socket_read_data {
  * @retval false otherwise.
  */
 bool hl78xx_is_registered(struct hl78xx_data *data);
+
+/**
+ * @brief Forget every modem socket of the session that just ended.
+ *
+ * A modem restart ends the session on either variant; on the HL7800 so does a
+ * PSM or eDRX entry, since it does not retain socket contexts across
+ * hibernation. A receiver blocked on one of the sockets is woken and reads the
+ * end of the session, or fails with ENOTCONN on a datagram socket; poll()
+ * reports a stream socket readable from then on, as a closed TCP connection
+ * is, and a datagram socket until that read. The application then closes it
+ * or creates it again with bind() or connect(), or, on the HL7800 in a
+ * low-power build, with a sendto() on a datagram socket. An HL7800 sleep thus
+ * ends the exchanges in flight: a CoAP client sees its requests fail with -EIO
+ * and requests again after the wake. Defined in hl78xx_sockets.c; the next
+ * close of such a socket is local.
+ */
+void hl78xx_invalidate_socket_contexts(struct hl78xx_data *data);
 
 /**
  * @brief DNS resolution work callback.
@@ -1276,6 +1340,44 @@ void hl78xx_enter_state(struct hl78xx_data *data, enum hl78xx_state state);
 void hl78xx_delegate_event(struct hl78xx_data *data, enum hl78xx_event evt);
 
 /**
+ * @brief Resume LTE service, running the config chain first if this session
+ *        has not been configured yet.
+ *
+ * Enters RUN_INIT_SCRIPT when init_sequence_completed is false (the chain ends
+ * by setting it and falling through to GPRS enable), or RUN_ENABLE_GPRS_SCRIPT
+ * directly when the session is already configured. Use this instead of
+ * entering RUN_ENABLE_GPRS_SCRIPT directly on any path that restores LTE after
+ * a detour (GNSS mode, airplane mode, carrier off): a session that booted
+ * straight into the detour has an unconfigured modem, and registration URCs
+ * from an unconfigured modem are deliberately discarded by hl78xx_on_cxreg().
+ *
+ * @param data Modem data structure.
+ */
+void hl78xx_enter_lte_restore_state(struct hl78xx_data *data);
+
+/**
+ * @brief Discard driver state that describes a modem session that has ended.
+ *
+ * Must be called at every hardware session boundary: cold power-on
+ * (AWAIT_POWER_ON entry), graceful power-down (INIT_POWER_OFF entry) and
+ * detected unexpected restart (+KSUP while already booted). The modem's RAM
+ * state is gone at these points, so any driver-side record of it — the cached
+ * phone functionality and the GNSS engine/search latches — is stale and must
+ * not survive into the next session. (Leaving them set is what made GNSS
+ * permanently unstartable: a gnss_start_status latched true could only be
+ * cleared by a +GNSSEV stop URC that a powered-off modem can never send.)
+ *
+ * Deliberately does NOT touch request/intent flags (gnss_mode_enter_pending):
+ * those record what the caller wants, not what the hardware was doing, and the
+ * boot path consumes them in the new session: a boot in airplane mode serves
+ * the request, a boot in fully functional mode drops it at the carrier-on, and
+ * a low-power build whose modem sleeps first serves it from sleep.
+ *
+ * @param data Modem data structure.
+ */
+void hl78xx_reset_modem_session_state(struct hl78xx_data *data);
+
+/**
  * @brief notif_carrier_off - Brief description of the function.
  * @param dev Description of dev.
  */
@@ -1308,6 +1410,13 @@ void hl78xx_start_timer(struct hl78xx_data *data, k_timeout_t timeout);
  * @param timeout the time to wait before submitting the work item.
  */
 void hl78xx_reschedule_timer(struct hl78xx_data *data, k_timeout_t timeout);
+
+/**
+ * @brief Get the remaining time for the timeout work item.
+ * @param data pointer to hl78xx_data.
+ * @return remaining time in milliseconds.
+ */
+uint32_t hl78xx_get_timer_remaining(struct hl78xx_data *data);
 
 /**
  * @brief Stop the timer.

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Philipp Steiner <philipp.steiner1987@gmail.com>
+ * Copyright (c) 2026 Philipp Steiner
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -55,7 +55,7 @@ static int fake_eth_send(const struct device *dev, struct net_pkt *pkt)
 	return 0;
 }
 
-static const struct ethernet_api fake_eth_api = {
+static DEVICE_API(ethernet, fake_eth_api) = {
 	.iface_api.init = fake_eth_iface_init,
 	.get_capabilities = fake_eth_caps,
 	.send = fake_eth_send,

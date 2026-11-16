@@ -14,12 +14,13 @@
 #include <zephyr/dt-bindings/pwm/pwm.h>
 
 / {
-	model = "ch32v00x_core";
 	compatible = "wch,ch32v006";
+	model = "ch32v00x_core";
 
 	chosen {
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
+		zephyr,flash-controller = &flash;
 		zephyr,console = &usart1;
 		zephyr,shell-uart = &usart1;
 	};
@@ -87,10 +88,10 @@
 };
 
 &usart1 {
-	status = "okay";
 	current-speed = <115200>;
 	pinctrl-0 = <&usart1_default>;
 	pinctrl-names = "default";
+	status = "okay";
 };
 
 &iwdg {
@@ -98,5 +99,9 @@
 };
 
 &tim1 {
+	status = "okay";
+};
+
+&esig {
 	status = "okay";
 };

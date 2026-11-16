@@ -50,8 +50,11 @@ enum mqtt_evt_type {
 	 */
 	MQTT_EVT_DISCONNECT,
 
-	/** Publish event received when message is published on a topic client
-	 *  is subscribed to.
+	/** Publish event received when the broker sends a PUBLISH message to the
+	 *  client. The library does not check the topic against the client's
+	 *  subscriptions, so the event is also raised for topics the client has
+	 *  not subscribed to. Applications must filter messages by topic when
+	 *  needed.
 	 *
 	 * @note PUBLISH event structure only contains payload size, the payload
 	 *       data parameter should be ignored. Payload content has to be
@@ -111,6 +114,25 @@ enum mqtt_qos {
 	 */
 	MQTT_QOS_2_EXACTLY_ONCE  = 0x02
 };
+
+#if defined(CONFIG_MQTT_VERSION_5_0) || defined(__DOXYGEN__)
+/** @brief MQTT v5.0 Retain Handling options. (MQTT 5.0, chapter 3.3.1.3) */
+enum mqtt_retain_handling {
+	/** Send the retained messages matching the Topic Filter
+	 *  of the subscription to the Client at the time of the subscribe.
+	 */
+	MQTT_RH_0_SEND_AT_SUBSCRIBE = 0x00,
+
+	/** If the subscription did not already exist, send all retained message matching
+	 *  the Topic Filter of the subscription to the Client, and if the subscription
+	 *  did exist do not send the retained messages.
+	 */
+	MQTT_RH_1_SEND_IF_NEW = 0x01,
+
+	/** Do not send retained messages at the time of the subscribe. */
+	MQTT_RH_2_DO_NOT_SEND = 0x02
+};
+#endif /* CONFIG_MQTT_VERSION_5_0 */
 
 /** @brief MQTT 3.1 CONNACK return codes. */
 enum mqtt_conn_return_code {
@@ -253,7 +275,9 @@ struct mqtt_topic_alias {
 	/** Topic name size. */
 	uint16_t topic_size;
 #elif defined(CONFIG_CPP)
-	/* C++ does not allow empty structs, add an extra 1 byte. */
+	/* An empty struct is not valid C, and compilers that accept it give
+	 * it size 0 while C++ gives 1. Keep a byte so both languages agree.
+	 */
 	uint8_t c;
 #endif /* CONFIG_MQTT_VERSION_5_0 */
 };
@@ -269,6 +293,14 @@ struct mqtt_topic {
 	 *  @ref mqtt_qos for details.
 	 */
 	uint8_t qos;
+#if defined(CONFIG_MQTT_VERSION_5_0) || defined(__DOXYGEN__)
+	/** MQTT 5.0, chapter 3.8.3.1 No Local subscription option. */
+	uint8_t no_local;
+	/** MQTT 5.0, chapter 3.8.3.1 Retain As Published subscription option. */
+	uint8_t retain_as_published;
+	/** MQTT 5.0, chapter 3.8.3.1 Retain Handling subscription option. */
+	uint8_t retain_handling;
+#endif
 };
 
 /** @brief Abstracts MQTT UTF-8 encoded string pair.
@@ -410,7 +442,9 @@ struct mqtt_common_ack_properties {
 		bool has_user_prop;
 	} rx;
 #elif defined(CONFIG_CPP)
-	/* C++ does not allow empty structs, add an extra 1 byte. */
+	/* An empty struct is not valid C, and compilers that accept it give
+	 * it size 0 while C++ gives 1. Keep a byte so both languages agree.
+	 */
 	uint8_t c;
 #endif /* CONFIG_MQTT_VERSION_5_0 */
 };
@@ -631,7 +665,9 @@ struct mqtt_disconnect_param {
 		} rx;
 	} prop;
 #elif defined(CONFIG_CPP)
-	/* C++ does not allow empty structs, add an extra 1 byte. */
+	/* An empty struct is not valid C, and compilers that accept it give
+	 * it size 0 while C++ gives 1. Keep a byte so both languages agree.
+	 */
 	uint8_t c;
 #endif /* CONFIG_MQTT_VERSION_5_0 */
 };
@@ -668,7 +704,9 @@ struct mqtt_auth_param {
 		} rx;
 	} prop;
 #elif defined(CONFIG_CPP)
-	/* C++ does not allow empty structs, add an extra 1 byte. */
+	/* An empty struct is not valid C, and compilers that accept it give
+	 * it size 0 while C++ gives 1. Keep a byte so both languages agree.
+	 */
 	uint8_t c;
 #endif /* CONFIG_MQTT_VERSION_5_0 */
 };
@@ -783,6 +821,11 @@ struct mqtt_sec_config {
 
 	/** Set socket to use native TLS (used with socket offloading). */
 	bool set_native_tls;
+
+	/** Indicates the preference for TLS session caching, one of the
+	 *  TLS_SESSION_CACHE socket option values. Disabled by default.
+	 */
+	int session_cache;
 };
 
 /** @brief MQTT transport type. */

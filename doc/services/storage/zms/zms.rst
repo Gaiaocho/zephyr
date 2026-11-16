@@ -171,6 +171,158 @@ the most recent ones to the oldest ones. If it finds a valid ATE with a matching
 its data and returns the number of bytes that were read.
 If a history count is provided and different than 0, older data with same ID is retrieved.
 
+ZMS entry enumeration (iterator API)
+====================================
+
+Applications can enumerate stored entries without supplying a predefined list of IDs.
+This is useful when IDs are derived from payload data (for example packed addresses) and the
+application does not keep a separate index in flash.
+
+This API family is generally used at boot, when the application rebuilds its in-memory state from
+the ID/length metadata persisted in ZMS.
+
+The iterator API consists of:
+
+- :c:func:`zms_iter_init` to initialize iterator state.
+- :c:func:`zms_iter_init_with_config` to initialize iterator state with optional ID mask and
+  inclusive ID range and predicate filters.
+- :c:func:`zms_iter_next` to retrieve one live entry (unique ID) at a time.
+- :c:func:`zms_iter_next_all` to retrieve all matching entries (full history, including delete markers).
+
+Choosing between :c:func:`zms_iter_next` and :c:func:`zms_iter_next_all`
+--------------------------------------------------------------------------
+
+- :c:func:`zms_iter_next` returns unique live ``(id, len)`` pairs:
+
+  - Sector/header entries are skipped.
+  - Delete markers (entries with ``len == 0``) are skipped.
+  - If the same ID appears multiple times in storage history, only the newest valid occurrence is
+    returned.
+  - To guarantee uniqueness, ZMS checks for newer entries of each candidate ID, which can require
+    additional scanning.
+
+- :c:func:`zms_iter_next_all` is faster and returns all matching ``(id, len)`` pairs as encountered:
+
+  - Historical entries for the same ID are returned.
+  - Delete markers (entries with ``len == 0``) are returned.
+  - No uniqueness filtering is performed.
+  - The application is responsible for filtering/compacting the returned pairs according to its
+    own policy.
+
+  Use :c:func:`zms_iter_init_with_config` when you want to enumerate only IDs matching a bitmask,
+  a specific inclusive ID range, a predicate callback, or any combination of those filters.
+
+Iterator return values
+----------------------
+
+Calling either :c:func:`zms_iter_next` or :c:func:`zms_iter_next_all` returns:
+
+- ``1`` when an entry is found; output arguments contain ID and data length.
+- ``0`` when there are no more entries to enumerate.
+- Negative errno on error (for example ``-EINVAL``, ``-EIO``, ``-ENXIO``).
+
+The iterator always reports metadata (ID and length). In addition, when the caller provides a
+non-NULL ``data`` buffer, the iterator also copies the entry's content directly into it, but
+only for entries small enough to be stored inside the ATE. For larger entries, or when no
+buffer is provided, the data must be read explicitly using :c:func:`zms_read` for the latest
+value, or :c:func:`zms_read_hist` for older revisions.
+
+.. _zms_iterator_concurrency:
+
+Concurrency and snapshot behavior
+---------------------------------
+
+The iterator captures a traversal boundary when :c:func:`zms_iter_init` is called.
+Entries written after initialization are not part of that traversal.
+
+Do not call :c:func:`zms_write` (including delete operations) on the same :c:struct:`zms_fs`
+between two iterator-step calls (:c:func:`zms_iter_next` or :c:func:`zms_iter_next_all`).
+If a write triggers garbage collection while iterating, iterator behavior is undefined.
+This rule applies to the thread doing the iteration regardless of locking: taking the lock
+described below only keeps *other* threads from writing during the traversal.
+
+Locking out concurrent writers
+------------------------------
+
+:c:struct:`zms_fs` exposes its internal write lock as a plain ``struct k_mutex zms_lock``
+field. :c:func:`zms_write` and :c:func:`zms_delete` take this mutex internally for the
+duration of the write. An application with multiple threads sharing the same
+:c:struct:`zms_fs` can hold this same mutex across an entire iteration to block writes
+from *other* threads for as long as the traversal boundary must stay valid:
+
+.. code-block:: c
+
+  k_mutex_lock(&fs.zms_lock, K_FOREVER);
+
+  rc = zms_iter_init(&fs, &iter);
+  /* ... */
+
+  while ((rc = zms_iter_next(&fs, &iter, &id, &len, NULL, 0)) == 1) {
+    /* ... */
+  }
+
+  k_mutex_unlock(&fs.zms_lock);
+
+Usage example
+-------------
+
+.. code-block:: c
+
+  struct zms_iter iter;
+  bool predicate_id_not_2(zms_id_t id)
+  {
+    return id != (zms_id_t)2;
+  }
+
+  struct zms_iter_config iter_config = {
+    .mask_id = (zms_id_t)0x03,
+    .min_id = (zms_id_t)0x01,
+    .max_id = (zms_id_t)0x03,
+    .use_mask = true,
+    .use_range = true,
+    .use_predicate = true,
+    .predicate_func = predicate_id_not_2,
+  };
+  zms_id_t id;
+  size_t len;
+  uint8_t data[ZMS_DATA_IN_ATE_SIZE];
+  int rc;
+
+  /* Block writes from other threads for the duration of the traversal. */
+  k_mutex_lock(&fs.zms_lock, K_FOREVER);
+
+  rc = zms_iter_init_with_config(&fs, &iter, &iter_config);
+  if (rc) {
+    /* handle error */
+  }
+
+  while ((rc = zms_iter_next(&fs, &iter, &id, &len, data, sizeof(data))) == 1) {
+    /* id: entry ID matching configured mask/range/predicate, len: current stored size */
+    /* data: filled with the entry's content when it is small enough to be
+     * stored directly inside the ATE; otherwise left untouched, in which case
+     * zms_read() must be used to fetch it.
+     */
+    printk("id=0x%llx len=%zu\n", (unsigned long long)id, len);
+  }
+
+  k_mutex_unlock(&fs.zms_lock);
+
+  if (rc < 0) {
+    /* handle iterator error */
+  }
+
+The optional ``data``/``data_len`` arguments can be set to ``NULL``/``0`` when only the
+``(id, len)`` pairs are needed. When a buffer is provided, only the data that ZMS stores
+directly inside the ATE is copied; larger entries must still be retrieved with
+:c:func:`zms_read`.
+
+Zero-initialize :c:struct:`zms_iter_config` or leave ``use_mask``, ``use_range``, and
+``use_predicate`` disabled to keep the default behavior: accept all IDs and the full
+``zms_id_t`` range.
+
+To determine how many revisions exist for an ID returned by the iterator,
+call :c:func:`zms_read_hist` with increasing ``cnt`` until ``-ENOENT`` is returned.
+
 ZMS free space calculation
 ==========================
 
@@ -444,6 +596,8 @@ Version 1
   and reinitialization on mount failure)
 - Supports a lookup cache to speed up repeated ID lookups with optional per-instance cache
   configuration to customize the cache size on a per-partition basis
+- Supports live-entry enumeration without predeclared ID lists via
+  :c:func:`zms_iter_init` and :c:func:`zms_iter_next`
 
 Future features
 ===============
@@ -554,6 +708,75 @@ ID size
   Unless you have a particular need for this, it's recommended to stick with 32-bit IDs.
   This is expected to have a slight impact on code size and performance, even on 64-bit systems,
   because the byte position of IDs in storage is not aligned to an 8-byte boundary.
+
+ZMS provisioning data generation
+********************************
+
+For products that need pre-loaded key-value data at manufacturing or first boot,
+ZMS provides a build-time provisioning generator script:
+``scripts/build/gen_zms_provision_data.py``.
+
+Purpose
+=======
+
+The script generates ZMS-formatted provisioning data and exports it as an Intel HEX image.
+This allows an application to start with pre-populated ZMS entries, without writing them
+at runtime.
+
+Typical use cases include:
+
+- Device identity records
+- Per-device calibration values
+- Production configuration values
+
+How it is used
+==============
+
+The script takes ZMS layout parameters (storage base address, storage size, write block
+size, and sector size) and one or more data sources:
+
+- ``-i`` for a text file containing ID/data pairs
+- ``-d`` for inline ID/data pairs
+
+It always produces a standalone provisioning-only image; it does not merge with an
+application HEX file itself. To flash both together, merge the result with the application
+HEX file separately, e.g. using ``scripts/build/mergehex.py``.
+
+If no input data is provided using ``-i`` or ``-d`` then only the sector headers will be generated.
+
+By default the script generates 32-bit IDs. Use ``--id-size 64`` when the application is built
+with :kconfig:option:`CONFIG_ZMS_ID_64BIT`; ZMS cannot mount an image whose ID size does not
+match its configuration.
+
+Example workflow
+================
+
+1. Generate a raw provisioning image:
+
+.. code-block:: shell
+
+   python3 ${ZEPHYR_BASE}/scripts/build/gen_zms_provision_data.py \
+     -f <storage_base_hex> \
+     -s <storage_size_hex> \
+     -w <write_block_size> \
+     -c <sector_size_hex> \
+     -i <input_data_file> \
+     -o provisioned_raw.hex
+
+2. Merge it with an application image:
+
+.. code-block:: shell
+
+   python3 ${ZEPHYR_BASE}/scripts/build/mergehex.py \
+     provisioned_raw.hex zephyr.hex \
+     -o zephyr_with_provision.hex
+
+Sample
+======
+
+See :zephyr:code-sample:`zms-provisioning` for a complete sample that integrates
+``gen_zms_provision_data.py`` into the build, merges the result with the application
+image, and configures ``west flash`` to program the provisioned image.
 
 API Reference
 *************

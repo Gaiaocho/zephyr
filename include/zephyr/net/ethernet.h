@@ -56,6 +56,7 @@ struct net_eth_addr {
 
 #define NET_ETH_HDR(pkt) ((struct net_eth_hdr *)net_pkt_data(pkt))
 
+/* clang-format off */
 /* zephyr-keep-sorted-start */
 #define NET_ETH_PTYPE_ALL		0x0003 /* from linux/if_ether.h */
 #define NET_ETH_PTYPE_ARP		0x0806
@@ -68,10 +69,12 @@ struct net_eth_addr {
 #define NET_ETH_PTYPE_IP		0x0800
 #define NET_ETH_PTYPE_IPV6		0x86dd
 #define NET_ETH_PTYPE_LLDP		0x88cc
+#define NET_ETH_PTYPE_OAM		0x8902
 #define NET_ETH_PTYPE_PTP		0x88f7
 #define NET_ETH_PTYPE_TSN		0x22f0 /* TSN (IEEE 1722) packet */
 #define NET_ETH_PTYPE_VLAN		0x8100
 /* zephyr-keep-sorted-stop */
+/* clang-format on */
 
 /* zephyr-keep-sorted-start re(^#define) */
 #if !defined(ETH_P_8021Q)
@@ -178,9 +181,6 @@ enum ethernet_hw_caps {
 	/** MAC address filtering supported */
 	ETHERNET_HW_FILTERING		= BIT(12),
 
-	/** Link Layer Discovery Protocol supported */
-	ETHERNET_LLDP			= BIT(13),
-
 	/** VLAN Tag stripping */
 	ETHERNET_HW_VLAN_TAG_STRIP	= BIT(14),
 
@@ -201,6 +201,15 @@ enum ethernet_hw_caps {
 
 	/** TX-Injection supported */
 	ETHERNET_TXINJECTION_MODE	= BIT(20),
+
+	/** The device forwards frames between its ports in hardware */
+	ETHERNET_HW_PORT_FORWARDING	= BIT(21),
+
+	/** The device applies a spanning tree port state to its hardware
+	 *  forwarding and passes BPDUs to the host, see
+	 *  @ref ethernet_stp_port_state.
+	 */
+	ETHERNET_HW_STP_PORT_STATE	= BIT(22),
 };
 
 /** @cond INTERNAL_HIDDEN */
@@ -227,6 +236,8 @@ enum ethernet_config_type {
 	ETHERNET_CONFIG_TYPE_RX_CHECKSUM_SUPPORT,
 	ETHERNET_CONFIG_TYPE_TX_CHECKSUM_SUPPORT,
 	ETHERNET_CONFIG_TYPE_EXTRA_TX_PKT_HEADROOM,
+	ETHERNET_CONFIG_TYPE_STP_PORT_STATE,
+	ETHERNET_CONFIG_TYPE_FDB_FLUSH,
 };
 
 enum ethernet_qav_param_type {
@@ -433,16 +444,6 @@ struct ethernet_filter {
 
 /** @cond INTERNAL_HIDDEN */
 
-/* The L2 multicast addresses are tracked only if something joins the groups,
- * either the IP level or a packet socket, and there is a receive filter to
- * program.
- */
-#if defined(CONFIG_NET_L2_ETHERNET) && !defined(CONFIG_NET_RAW_MODE) &&	\
-	(defined(CONFIG_NET_NATIVE_IP) ||				\
-	 defined(CONFIG_NET_SOCKETS_PACKET_MCAST_MEMBERSHIP))
-#define NET_ETH_MCAST_FILTER_SUPPORTED 1
-#endif
-
 /* How many L2 multicast addresses one interface can track. The build system
  * sums up what the subsystems asked for and gives the result here, the
  * Kconfig value is only the floor and is used if the header is compiled
@@ -450,6 +451,14 @@ struct ethernet_filter {
  */
 #ifndef NET_ETH_MCAST_FILTER_COUNT
 #define NET_ETH_MCAST_FILTER_COUNT CONFIG_NET_L2_ETHERNET_MCAST_FILTER_COUNT
+#endif
+
+/* The L2 multicast addresses are tracked only if something joins the groups,
+ * either the IP level, a packet socket, or other parts of the system.
+ */
+#if defined(CONFIG_NET_L2_ETHERNET) && !defined(CONFIG_NET_RAW_MODE) &&	\
+	(NET_ETH_MCAST_FILTER_COUNT > 0)
+#define NET_ETH_MCAST_FILTER_SUPPORTED 1
 #endif
 
 /** @endcond */
@@ -511,6 +520,25 @@ enum ethernet_checksum_support {
 	ETHERNET_CHECKSUM_SUPPORT_UDP			= NET_IF_CHECKSUM_UDP_BIT,
 };
 
+/**
+ * @brief Spanning tree state of a port that forwards in hardware
+ *
+ * The Ethernet bridge sets it with ETHERNET_CONFIG_TYPE_STP_PORT_STATE on a
+ * port whose device reports ETHERNET_HW_STP_PORT_STATE, and asks the device
+ * to remove the addresses it learned on the port with
+ * ETHERNET_CONFIG_TYPE_FDB_FLUSH. In every state the device passes the BPDUs
+ * received on the port to the host and sends the ones the host gives it.
+ * A port not under the spanning tree protocol is in the forwarding state.
+ */
+enum ethernet_stp_port_state {
+	/** Neither learn source addresses nor forward frames */
+	ETHERNET_STP_PORT_STATE_DISCARDING,
+	/** Learn source addresses, do not forward frames */
+	ETHERNET_STP_PORT_STATE_LEARNING,
+	/** Learn source addresses and forward frames */
+	ETHERNET_STP_PORT_STATE_FORWARDING,
+};
+
 /** @cond INTERNAL_HIDDEN */
 
 struct ethernet_config {
@@ -533,6 +561,8 @@ struct ethernet_config {
 		struct ethernet_filter filter;
 
 		uint16_t extra_tx_pkt_headroom;
+
+		enum ethernet_stp_port_state stp_port_state;
 	} /**< Value for the selected Ethernet configuration type */;
 };
 
@@ -549,12 +579,12 @@ enum ethernet_stats_type {
 };
 
 /** Ethernet L2 API operations. */
-struct ethernet_api {
+__subsystem struct ethernet_driver_api {
 	/**
-	 * The net_if_api must be placed in first position in this
+	 * The net_if_driver_api must be placed in first position in this
 	 * struct so that we are compatible with network interface API.
 	 */
-	struct net_if_api iface_api;
+	struct net_if_driver_api iface_api;
 
 	/** Collect optional ethernet specific statistics. This pointer
 	 * should be set by driver if statistics needs to be collected
@@ -618,10 +648,7 @@ struct ethernet_api {
 
 /** @cond INTERNAL_HIDDEN */
 
-/* Make sure that the network interface API is properly setup inside
- * Ethernet API struct (it is the first one).
- */
-BUILD_ASSERT(offsetof(struct ethernet_api, iface_api) == 0);
+DEVICE_API_EXTENDS(ethernet, net_if, iface_api);
 
 struct net_eth_hdr {
 	struct net_eth_addr dst;
@@ -681,6 +708,9 @@ struct ethernet_context {
 
 #if defined(CONFIG_NET_ETHERNET_BRIDGE)
 	struct net_if *bridge;
+
+	/* Index of this interface in the port table of its bridge */
+	uint8_t bridge_port;
 #endif
 
 	/** Carrier ON/OFF handler worker. This is used to create
@@ -992,6 +1022,25 @@ void net_eth_mcast_addr_foreach(struct net_if *iface,
 				net_eth_mcast_addr_cb_t cb,
 				void *user_data);
 
+/** @cond INTERNAL_HIDDEN */
+
+/**
+ * @brief Join or leave the L2 multicast group of an IP multicast address.
+ *
+ * @details Converts the IP address to its Ethernet multicast address and
+ * calls net_eth_mcast_addr_add() or net_eth_mcast_addr_rm() with it.
+ *
+ * @param iface Network interface
+ * @param addr IPv4 or IPv6 multicast address
+ * @param add True to join the group, false to leave it
+ *
+ * @return -EINVAL if the address family is not supported, otherwise the
+ * return value of net_eth_mcast_addr_add() or net_eth_mcast_addr_rm()
+ */
+int net_eth_mcast_ip_addr_update(struct net_if *iface, const struct net_addr *addr, bool add);
+
+/** @endcond */
+
 #else /* NET_ETH_MCAST_FILTER_SUPPORTED */
 
 static inline int net_eth_mcast_addr_add(struct net_if *iface,
@@ -1021,6 +1070,13 @@ static inline void net_eth_mcast_addr_foreach(struct net_if *iface,
 	ARG_UNUSED(user_data);
 }
 
+static inline int net_eth_mcast_ip_addr_update(struct net_if *iface __unused,
+					       const struct net_addr *addr __unused,
+					       bool add __unused)
+{
+	return -ENOTSUP;
+}
+
 #endif /* NET_ETH_MCAST_FILTER_SUPPORTED */
 
 /**
@@ -1034,7 +1090,7 @@ static inline
 enum ethernet_hw_caps net_eth_get_hw_capabilities(struct net_if *iface)
 {
 	const struct device *dev = net_if_get_device(iface);
-	const struct ethernet_api *api;
+	const struct ethernet_driver_api *api;
 	enum ethernet_hw_caps caps = (enum ethernet_hw_caps)0;
 #if defined(CONFIG_NET_DSA)
 	struct ethernet_context *eth_ctx = net_if_l2_data(iface);
@@ -1049,8 +1105,8 @@ enum ethernet_hw_caps net_eth_get_hw_capabilities(struct net_if *iface)
 #endif
 	NET_ASSERT(dev != NULL);
 
-	api = (const struct ethernet_api *)dev->api;
-	if (api == NULL || api->get_capabilities == NULL) {
+	api = (const struct ethernet_driver_api *)dev->api;
+	if (api->get_capabilities == NULL) {
 		return caps;
 	}
 
@@ -1071,11 +1127,11 @@ int net_eth_get_hw_config(struct net_if *iface, enum ethernet_config_type type,
 			 struct ethernet_config *config)
 {
 	const struct device *dev = net_if_get_device(iface);
-	const struct ethernet_api *eth;
+	const struct ethernet_driver_api *eth;
 
 	NET_ASSERT(dev != NULL);
 
-	eth = (const struct ethernet_api *)dev->api;
+	eth = (const struct ethernet_driver_api *)dev->api;
 
 	NET_ASSERT(eth != NULL);
 

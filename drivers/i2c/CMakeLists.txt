@@ -20,6 +20,16 @@ zephyr_library_sources_ifdef(CONFIG_USERSPACE i2c_handlers.c)
 
 add_subdirectory_ifdef(CONFIG_I2C_TARGET target)
 
+if(CONFIG_I2C_NATIVE_LINUX)
+  if(${CMAKE_HOST_SYSTEM_NAME} STREQUAL Linux)
+    zephyr_library_sources(i2c_native_linux.c)
+    target_compile_options(native_simulator BEFORE INTERFACE -I${BOARD_DIR})
+    target_sources(native_simulator INTERFACE i2c_native_linux_bottom.c)
+  else()
+    message(FATAL_ERROR "CONFIG_I2C_NATIVE_LINUX is only available on Linux")
+  endif()
+endif()
+
 zephyr_library_include_directories_ifdef(CONFIG_I2C_AMEBA ${ZEPHYR_BASE}/drivers/dma)
 
 # zephyr-keep-sorted-start
@@ -94,6 +104,7 @@ zephyr_library_sources_ifdef(CONFIG_I2C_SMARTBOND i2c_smartbond.c)
 zephyr_library_sources_ifdef(CONFIG_I2C_SY1XX i2c_sy1xx.c)
 zephyr_library_sources_ifdef(CONFIG_I2C_TCA954X i2c_tca954x.c)
 zephyr_library_sources_ifdef(CONFIG_I2C_TELINK_B91 i2c_b91.c)
+zephyr_library_sources_ifdef(CONFIG_I2C_VIRTIO i2c_virtio.c)
 zephyr_library_sources_ifdef(CONFIG_I2C_WCH i2c_wch.c)
 zephyr_library_sources_ifdef(CONFIG_I2C_XEC i2c_mchp_xec.c)
 zephyr_library_sources_ifdef(CONFIG_I2C_XEC_V2 i2c_mchp_xec_v2.c)

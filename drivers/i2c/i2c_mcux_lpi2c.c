@@ -47,6 +47,7 @@ struct mcux_lpi2c_config {
 	DEVICE_MMIO_NAMED_ROM(reg_base);
 	const struct device *clock_dev;
 	clock_control_subsys_t clock_subsys;
+	clock_control_subsys_t clock_cfg;
 	void (*irq_config_func)(const struct device *dev);
 	uint32_t bitrate;
 	uint32_t bus_idle_timeout_ns;
@@ -123,9 +124,9 @@ static int mcux_lpi2c_configure(const struct device *dev,
 	return 0;
 }
 
-static void mcux_lpi2c_master_transfer_callback(LPI2C_Type *base,
-						lpi2c_master_handle_t *handle,
-						status_t status, void *userData)
+static void mcux_lpi2c_controller_transfer_callback(LPI2C_Type *base,
+						    lpi2c_master_handle_t *handle,
+						    status_t status, void *userData)
 {
 	struct mcux_lpi2c_data *data = userData;
 
@@ -316,7 +317,7 @@ restore:
 #endif /* CONFIG_I2C_MCUX_LPI2C_BUS_RECOVERY */
 
 #ifdef CONFIG_I2C_TARGET
-static void mcux_lpi2c_slave_irq_handler(const struct device *dev)
+static void mcux_lpi2c_target_irq_handler(const struct device *dev)
 {
 	struct mcux_lpi2c_data *data = dev->data;
 	LPI2C_Type *base = (LPI2C_Type *)DEVICE_MMIO_NAMED_GET(dev, reg_base);
@@ -325,7 +326,7 @@ static void mcux_lpi2c_slave_irq_handler(const struct device *dev)
 	uint32_t flags;
 	uint8_t i2c_data;
 
-	/* Note- the HAL provides a callback-based I2C slave API, but
+	/* Note- the HAL provides a callback-based I2C target API, but
 	 * the API expects the user to provide a transmit buffer of
 	 * a fixed length at the first byte received, and will not signal
 	 * the user callback until this buffer is exhausted. This does not
@@ -336,7 +337,7 @@ static void mcux_lpi2c_slave_irq_handler(const struct device *dev)
 	flags = LPI2C_SlaveGetStatusFlags(base);
 
 	if (flags & kLPI2C_SlaveAddressValidFlag) {
-		/* Read Slave address to clear flag */
+		/* Read target address to clear flag */
 		LPI2C_SlaveGetReceivedAddress(base);
 		data->first_tx = true;
 		/* Reset to sending ACK, in case we NAK'ed before */
@@ -415,7 +416,7 @@ static int mcux_lpi2c_target_register(const struct device *dev,
 	const struct mcux_lpi2c_config *config = dev->config;
 	struct mcux_lpi2c_data *data = dev->data;
 	LPI2C_Type *base = (LPI2C_Type *)DEVICE_MMIO_NAMED_GET(dev, reg_base);
-	lpi2c_slave_config_t slave_config;
+	lpi2c_slave_config_t target_cfg;
 	uint32_t clock_freq;
 
 	LPI2C_MasterDeinit(base);
@@ -438,14 +439,14 @@ static int mcux_lpi2c_target_register(const struct device *dev,
 	data->target_cfg = target_config;
 	data->first_tx = false;
 
-	LPI2C_SlaveGetDefaultConfig(&slave_config);
-	slave_config.address0 = target_config->address;
+	LPI2C_SlaveGetDefaultConfig(&target_cfg);
+	target_cfg.address0 = target_config->address;
 	/* Note- this setting enables clock stretching to allow the
-	 * slave to respond to each byte with an ACK/NAK.
+	 * target to respond to each byte with an ACK/NAK.
 	 * this behavior may cause issues with some I2C controllers.
 	 */
-	slave_config.sclStall.enableAck = true;
-	LPI2C_SlaveInit(base, &slave_config, clock_freq);
+	target_cfg.sclStall.enableAck = true;
+	LPI2C_SlaveInit(base, &target_cfg, clock_freq);
 	/* Clear all flags. */
 	LPI2C_SlaveClearStatusFlags(base, (uint32_t)kLPI2C_SlaveClearFlags);
 	/* Enable interrupt */
@@ -490,7 +491,7 @@ static void mcux_lpi2c_isr(const struct device *dev)
 
  #ifdef CONFIG_I2C_TARGET
 	if (data->target_attached) {
-		mcux_lpi2c_slave_irq_handler(dev);
+		mcux_lpi2c_target_irq_handler(dev);
 	}
 #endif /* CONFIG_I2C_TARGET */
 
@@ -549,7 +550,7 @@ static int mcux_lpi2c_init(const struct device *dev)
 	struct mcux_lpi2c_data *data = dev->data;
 	LPI2C_Type *base;
 	uint32_t clock_freq, bitrate_cfg;
-	lpi2c_master_config_t master_config;
+	lpi2c_master_config_t controller_config;
 	int error;
 
 	DEVICE_MMIO_NAMED_MAP(dev, reg_base, K_MEM_CACHE_NONE | K_MEM_DIRECT_MAP);
@@ -591,16 +592,23 @@ static int mcux_lpi2c_init(const struct device *dev)
 	}
 #endif /* CONFIG_I2C_MCUX_LPI2C_BUS_RECOVERY */
 
+	if (config->clock_cfg != NULL) {
+		if (clock_control_configure(config->clock_dev,
+					    config->clock_cfg, NULL) != 0) {
+			return -EINVAL;
+		}
+	}
+
 	if (clock_control_get_rate(config->clock_dev, config->clock_subsys,
 				   &clock_freq)) {
 		return -EINVAL;
 	}
 
-	LPI2C_MasterGetDefaultConfig(&master_config);
-	master_config.busIdleTimeout_ns = config->bus_idle_timeout_ns;
-	LPI2C_MasterInit(base, &master_config, clock_freq);
+	LPI2C_MasterGetDefaultConfig(&controller_config);
+	controller_config.busIdleTimeout_ns = config->bus_idle_timeout_ns;
+	LPI2C_MasterInit(base, &controller_config, clock_freq);
 	LPI2C_MasterTransferCreateHandle(base, &data->handle,
-					 mcux_lpi2c_master_transfer_callback,
+					 mcux_lpi2c_controller_transfer_callback,
 					 data);
 
 	bitrate_cfg = i2c_map_dt_bitrate(config->bitrate);
@@ -685,6 +693,10 @@ static DEVICE_API(i2c, mcux_lpi2c_driver_api) = {
 		.clock_subsys = (clock_control_subsys_t)COND_CODE_1(	\
 			DT_PHA_HAS_CELL(DT_DRV_INST(n), clocks, name),	\
 			(DT_INST_CLOCKS_CELL(n, name)), (0U)),		\
+		.clock_cfg = (clock_control_subsys_t)COND_CODE_1(	\
+			DT_INST_CLOCKS_HAS_NAME(n, source),		\
+			(DT_INST_CLOCKS_CELL_BY_NAME(n, source, name)),	\
+			(0U)),						\
 		.irq_config_func = mcux_lpi2c_config_func_##n,		\
 		.bitrate = DT_INST_PROP(n, clock_frequency),		\
 		.pincfg = PINCTRL_DT_INST_DEV_CONFIG_GET(n),		\

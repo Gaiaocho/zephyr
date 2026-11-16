@@ -99,7 +99,7 @@ static void icm4268x_complete_cb(struct rtio *r, const struct rtio_sqe *sqe, int
 	int rc;
 
 	if (drv_data->streaming_sqe == NULL ||
-	    FIELD_GET(RTIO_SQE_CANCELED, drv_data->streaming_sqe->sqe.flags)) {
+	    rtio_iodev_sqe_is_canceled(drv_data->streaming_sqe)) {
 		LOG_ERR("%p Complete CB triggered with NULL handle. Disabling Interrupt", dev);
 		(void)gpio_pin_interrupt_configure_dt(&dev_cfg->gpio_int1, GPIO_INT_DISABLE);
 		(void)atomic_set(&drv_data->state, ICM4268X_STREAM_OFF);
@@ -120,6 +120,10 @@ static void icm4268x_complete_cb(struct rtio *r, const struct rtio_sqe *sqe, int
 		accel_fs_hr = ICM42686_DT_ACCEL_FS_32;
 		gyro_fs_hr = ICM42686_DT_GYRO_FS_4000;
 		break;
+	case ICM4268X_VARIANT_IIM42653:
+		accel_fs_hr = IIM42653_DT_ACCEL_FS_32;
+		gyro_fs_hr = IIM42653_DT_GYRO_FS_4000;
+		break;
 	default:
 		CODE_UNREACHABLE;
 	}
@@ -132,6 +136,12 @@ static void icm4268x_complete_cb(struct rtio *r, const struct rtio_sqe *sqe, int
 		icm4268x_stream_result(dev, -ENOMEM);
 		return;
 	}
+
+	struct sensor_read_config *read_config =
+		(struct sensor_read_config *)streaming_sqe->sqe.iodev->data;
+	struct sensor_stream_trigger *fifo_ths_cfg =
+		icm4268x_get_read_config_trigger(read_config, SENSOR_TRIG_FIFO_WATERMARK);
+	bool has_fifo_data = fifo_ths_cfg && fifo_ths_cfg->opt == SENSOR_STREAM_DATA_INCLUDE;
 
 	struct icm4268x_fifo_data *edata = (struct icm4268x_fifo_data *)buf;
 	struct icm4268x_fifo_data hdr = {
@@ -148,7 +158,7 @@ static void icm4268x_complete_cb(struct rtio *r, const struct rtio_sqe *sqe, int
 		.int_status = drv_data->int_status,
 		.gyro_odr = drv_data->cfg.gyro_odr,
 		.accel_odr = drv_data->cfg.accel_odr,
-		.fifo_count = drv_data->cfg.fifo_wm,
+		.fifo_count = has_fifo_data ? drv_data->cfg.fifo_wm : 0,
 		.rtc_freq = drv_data->cfg.rtc_freq,
 	};
 	*edata = hdr;
@@ -192,7 +202,7 @@ void icm4268x_fifo_event(const struct device *dev)
 	int rc;
 
 	if (drv_data->streaming_sqe == NULL ||
-	    FIELD_GET(RTIO_SQE_CANCELED, drv_data->streaming_sqe->sqe.flags)) {
+	    rtio_iodev_sqe_is_canceled(drv_data->streaming_sqe)) {
 		LOG_ERR("%p FIFO event triggered with no stream submisssion. Disabling IRQ", dev);
 		(void)gpio_pin_interrupt_configure_dt(&dev_cfg->gpio_int1, GPIO_INT_DISABLE);
 		(void)atomic_set(&drv_data->state, ICM4268X_STREAM_OFF);

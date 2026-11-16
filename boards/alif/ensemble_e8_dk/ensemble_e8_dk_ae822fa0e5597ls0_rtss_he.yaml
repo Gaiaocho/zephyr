@@ -9,3 +9,7 @@ arch: arm
 vendor: alif
 toolchain:
   - zephyr
+supported:
+  - gpio
+  - i2c
+  - spi

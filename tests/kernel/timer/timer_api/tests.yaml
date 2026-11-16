@@ -4,6 +4,13 @@ tests:
       - kernel
       - timer
       - userspace
+  kernel.timer.timeout_32bit:
+    tags:
+      - kernel
+      - timer
+      - userspace
+    extra_configs:
+      - CONFIG_TIMEOUT_64BIT=n
   kernel.timer.sloppy_idle:
     tags:
       - kernel
@@ -16,6 +23,7 @@ tests:
       - native_sim
       - qemu_riscv32
       - qemu_x86
+      - qemu_leon3
     integration_platforms:
       - native_sim
     extra_configs:

@@ -7,6 +7,8 @@
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/types.h>
 #include <zephyr/device.h>
+#include <zephyr/init.h>
+#include <zephyr/nvmem.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/pm/device.h>
 #include <zephyr/dt-bindings/clock/nxp_mcxw7x_clock.h>
@@ -242,6 +244,7 @@ static int nxp_mcxw_clock_control_pm(const struct device *dev, enum pm_device_ac
 	return 0;
 }
 
+#if !defined(CONFIG_TRUSTED_EXECUTION_NONSECURE)
 static int nxp_mcxw_clock_validate_sys_clk_src(const struct mcxw_clock_control_config *config)
 {
 #if !DT_INST_PROP(0, sirc_supported)
@@ -274,11 +277,33 @@ static int nxp_mcxw_clock_validate_sys_clk_src(const struct mcxw_clock_control_c
 
 	return 0;
 }
+#endif /* !CONFIG_TRUSTED_EXECUTION_NONSECURE */
 
 static int nxp_mcxw_clock_control_init(const struct device *dev)
 {
 	const struct mcxw_clock_control_config *config = dev->config;
 
+#if defined(CONFIG_TRUSTED_EXECUTION_NONSECURE)
+	/*
+	 * TF-M non-secure build:
+	 *
+	 * Secure firmware owns global clock, oscillator, voltage,
+	 * flash wait-state, power and security setup.
+	 *
+	 * Do not reconfigure SYSCLK, FIRC, SIRC, SOSC, ROSC, CCM32K,
+	 * SPC or FMU from the non-secure image.
+	 *
+	 * The secure image must configure the clock tree before jumping
+	 * to the non-secure image.
+	 */
+
+	if (config->core_clock_frequency != 0U) {
+		SystemCoreClock = config->core_clock_frequency;
+	} else {
+		SystemCoreClock = CLOCK_GetCoreSysClkFreq();
+	}
+
+#else
 	if (nxp_mcxw_clock_validate_sys_clk_src(config) != 0) {
 		return -EINVAL;
 	}
@@ -295,6 +320,24 @@ static int nxp_mcxw_clock_control_init(const struct device *dev)
 
 	/* Init OSC32K */
 	CLOCK_SetRoscMonitorMode(kSCG_RoscMonitorDisable);
+
+	/*
+	 * CCM32K registers are not reset on a warm boot. If a previous application
+	 * selected OSC32K as the 32 kHz clock source and this application disables
+	 * OSC32K, CCM32K_Set32kOscConfig() asserts because OSC32K cannot be
+	 * disabled while it is the active source. Switch the 32 kHz source back to
+	 * FRO32K first.
+	 */
+	if ((config->osc32k_mode == kCCM32K_Disable32kHzCrystalOsc) &&
+	    (CCM32K_GetClockSource(CCM32K) == kCCM32K_ClockSource32kOsc)) {
+		/* FRO32K must be enabled before it can be selected as the source. */
+		CCM32K_Enable32kFro(CCM32K, true);
+		CCM32K_SelectClockSource(CCM32K, kCCM32K_ClockSourceSelectFro32k);
+		/* Wait until FRO32K is the active 32 kHz clock source. */
+		while ((CCM32K_GetStatusFlag(CCM32K) & kCCM32K_32kFroActiveStatusFlag) == 0UL) {
+		}
+	}
+
 	ccm32k_osc_config_t ccm32k_osc_config = {
 		.coarseAdjustment = config->coarse_adjustment,
 		.enableInternalCapBank = true,
@@ -306,7 +349,7 @@ static int nxp_mcxw_clock_control_init(const struct device *dev)
 	/* Switch to safe clock source (SIRC) before reconfiguring FIRC */
 	scg_sys_clk_config_t sys_clk_safe_config_source = {
 #if DT_INST_NODE_HAS_PROP(0, sys_clk_div_plat)
-		.divPlat = (uint32_t)kSCG_SysClkDivBy1,
+		.divCore1 = (uint32_t)kSCG_SysClkDivBy1,
 #endif
 		.divSlow = (uint32_t)kSCG_SysClkDivBy4,
 		.divBus = (uint32_t)kSCG_SysClkDivBy1,
@@ -372,7 +415,7 @@ static int nxp_mcxw_clock_control_init(const struct device *dev)
 	/* Configure system clock with user-defined settings */
 	scg_sys_clk_config_t sys_clk_config = {
 #if DT_INST_NODE_HAS_PROP(0, sys_clk_div_plat)
-		.divPlat = (config->sys_clk_div_plat - 1),
+		.divCore1 = (config->sys_clk_div_plat - 1),
 #endif
 		.divSlow = (config->sys_clk_div_slow - 1),
 		.divBus = (config->sys_clk_div_bus - 1),
@@ -416,6 +459,7 @@ static int nxp_mcxw_clock_control_init(const struct device *dev)
 	/* Enable 32kHz clock output to all peripherals.  */
 	CCM32K_EnableCLKOutToPeripherals(CCM32K, 0xFF);
 #endif
+#endif /* CONFIG_TRUSTED_EXECUTION_NONSECURE */
 
 	return pm_device_driver_init(dev, nxp_mcxw_clock_control_pm);
 }
@@ -449,6 +493,82 @@ static struct mcxw_clock_control_config config = {
 	.sosc_freq = DT_INST_PROP(0, sosc_freq),
 	.core_clock_frequency = DT_INST_PROP(0, core_clock_frequency),
 };
+
+#if DT_INST_NODE_HAS_PROP(0, nvmem_cells) && defined(CONFIG_NVMEM_FLASH) &&                        \
+	!defined(CONFIG_TRUSTED_EXECUTION_NONSECURE)
+/*
+ * The factory OSC32K trim lives in a non-volatile memory which is only readable once its
+ * provider is initialized. The capacitance values from the devicetree are applied at
+ * PRE_KERNEL_1 and refined here, at POST_KERNEL, when a valid trim is available. This
+ * requires the flash driver, hence CONFIG_FLASH, to be enabled by the application.
+ */
+/* Bit 7 of the stored byte flags the trim as valid, the capacitance value is in the low bits */
+#define MCXW_OSC32K_TRIM_VALID 0x80U
+#define MCXW_OSC32K_XTAL_TRIM_MAX                                                                  \
+	(CCM32K_OSC32K_CTRL_XTAL_CAP_SEL_MASK >> CCM32K_OSC32K_CTRL_XTAL_CAP_SEL_SHIFT)
+#define MCXW_OSC32K_EXTAL_TRIM_MAX                                                                 \
+	(CCM32K_OSC32K_CTRL_EXTAL_CAP_SEL_MASK >> CCM32K_OSC32K_CTRL_EXTAL_CAP_SEL_SHIFT)
+
+BUILD_ASSERT(MCXW_OSC32K_XTAL_TRIM_MAX == MCXW_OSC32K_EXTAL_TRIM_MAX,
+	     "XTAL and EXTAL capacitance fields must have the same width");
+BUILD_ASSERT(MCXW_OSC32K_XTAL_TRIM_MAX < MCXW_OSC32K_TRIM_VALID,
+	     "The capacitance fields must not overlap the trim valid flag");
+
+#if defined(CONFIG_FLASH_INIT_PRIORITY)
+BUILD_ASSERT(CONFIG_CLOCK_CONTROL_NXP_MCXW7X_IFR_TRIM_INIT_PRIORITY > CONFIG_FLASH_INIT_PRIORITY,
+	     "The OSC32K trim must be applied after the flash driver is initialized");
+#endif
+
+static int nxp_mcxw_clock_osc32k_ifr_trim(void)
+{
+	static const struct nvmem_cell trim_cell = NVMEM_CELL_GET_BY_IDX(DT_DRV_INST(0), 0);
+	uint8_t raw;
+	uint32_t trim;
+	uint32_t reg;
+	int ret;
+
+	if (config.osc32k_mode != kCCM32K_Enable32kHzCrystalOsc) {
+		return 0;
+	}
+
+	ret = nvmem_cell_read(&trim_cell, &raw, 0, sizeof(raw));
+	if (ret < 0) {
+		LOG_DBG("OSC32K trim not readable (%d), keeping devicetree values", ret);
+		return 0;
+	}
+
+	if (raw == 0xFFU) {
+		LOG_DBG("OSC32K trim not provisioned, keeping devicetree values");
+		return 0;
+	}
+
+	if ((raw & MCXW_OSC32K_TRIM_VALID) == 0U) {
+		LOG_DBG("OSC32K trim 0x%02x not valid, keeping devicetree values", raw);
+		return 0;
+	}
+
+	/* 0 is a valid capacitance selection */
+	trim = (uint32_t)raw & ~MCXW_OSC32K_TRIM_VALID;
+	if (trim > MCXW_OSC32K_XTAL_TRIM_MAX) {
+		LOG_DBG("OSC32K trim 0x%02x out of range, keeping devicetree values", raw);
+		return 0;
+	}
+
+	/* OSC32K stays enabled, the capacitance selection can be changed on the fly */
+	reg = CCM32K->OSC32K_CTRL;
+	reg &= ~(CCM32K_OSC32K_CTRL_XTAL_CAP_SEL_MASK | CCM32K_OSC32K_CTRL_EXTAL_CAP_SEL_MASK);
+	reg |= CCM32K_OSC32K_CTRL_XTAL_CAP_SEL(trim) | CCM32K_OSC32K_CTRL_EXTAL_CAP_SEL(trim);
+	CCM32K->OSC32K_CTRL = reg;
+	__DMB();
+
+	LOG_DBG("OSC32K trim 0x%02x applied (cap sel %u)", raw, trim);
+
+	return 0;
+}
+
+SYS_INIT(nxp_mcxw_clock_osc32k_ifr_trim, POST_KERNEL,
+	 CONFIG_CLOCK_CONTROL_NXP_MCXW7X_IFR_TRIM_INIT_PRIORITY);
+#endif /* nvmem-cells && CONFIG_NVMEM_FLASH && !CONFIG_TRUSTED_EXECUTION_NONSECURE */
 
 DEVICE_DT_INST_DEFINE(0, nxp_mcxw_clock_control_init, NULL, NULL, &config, PRE_KERNEL_1,
 		      CONFIG_CLOCK_CONTROL_INIT_PRIORITY, &nxp_mcxw_clock_control_api);

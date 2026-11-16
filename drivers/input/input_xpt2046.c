@@ -83,7 +83,7 @@ static void xpt2046_isr_handler(const struct device *dev, struct gpio_callback *
 	const struct xpt2046_config *config = data->dev->config;
 
 	gpio_remove_callback(config->int_gpio.port, &data->int_gpio_cb);
-	k_work_submit(&data->work);
+	input_work_submit(&data->work);
 }
 
 static int xpt2046_read_and_cumulate(const struct spi_dt_spec *bus, const struct spi_buf_set *tx,
@@ -121,7 +121,7 @@ static void xpt2046_release_handler(struct k_work *kw)
 		input_report_key(data->dev, INPUT_BTN_TOUCH, 0, true, K_FOREVER);
 	} else {
 		/* Re-check later */
-		k_work_reschedule(&data->dwork, K_MSEC(10));
+		input_work_reschedule(&data->dwork, K_MSEC(10));
 	}
 }
 
@@ -182,7 +182,7 @@ static void xpt2046_work_handler(struct k_work *kw)
 		data->pressed = pressed;
 
 		/* Ensure that we send released event */
-		k_work_reschedule(&data->dwork, K_MSEC(100));
+		input_work_reschedule(&data->dwork, K_MSEC(100));
 	}
 
 reenable_cb:
@@ -241,7 +241,7 @@ static int xpt2046_init(const struct device *dev)
 #define XPT2046_INIT(index)                                                                        \
 	static const struct xpt2046_config xpt2046_config_##index = {                              \
 		.bus = SPI_DT_SPEC_INST_GET(                                                       \
-			index, SPI_OP_MODE_MASTER | SPI_TRANSFER_MSB | SPI_WORD_SET(8)),           \
+			index, SPI_OP_MODE_CONTROLLER | SPI_TRANSFER_MSB | SPI_WORD_SET(8)),       \
 		.int_gpio = GPIO_DT_SPEC_INST_GET(index, int_gpios),                               \
 		.min_x = DT_INST_PROP(index, min_x),                                               \
 		.min_y = DT_INST_PROP(index, min_y),                                               \

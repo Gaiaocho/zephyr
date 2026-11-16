@@ -175,11 +175,19 @@ static int select_target_iface(struct wg_peer *peer,
 			       struct net_sockaddr_storage *dst,
 			       struct net_if **iface)
 {
+	int ifindex = peer->ctx->wg_ctx->ifindex;
+
 	if (IS_ENABLED(CONFIG_NET_IPV6) && dst->ss_family == NET_AF_INET6) {
 		const struct net_in6_addr *src;
 
-		*iface = net_if_ipv6_select_src_iface_addr(
-			&net_sin6(net_sad(dst))->sin6_addr, &src);
+		if (ifindex > 0) {
+			*iface = net_if_get_by_index(ifindex);
+			src = net_if_ipv6_select_src_addr(*iface,
+				&net_sin6(net_sad(dst))->sin6_addr);
+		} else {
+			*iface = net_if_ipv6_select_src_iface_addr(
+				&net_sin6(net_sad(dst))->sin6_addr, &src);
+		}
 
 		net_ipv6_addr_copy_raw((uint8_t *)(&net_sin6(addr)->sin6_addr),
 				       (const uint8_t *)src);
@@ -188,8 +196,14 @@ static int select_target_iface(struct wg_peer *peer,
 	} else if (IS_ENABLED(CONFIG_NET_IPV4) && dst->ss_family == NET_AF_INET) {
 		const struct net_in_addr *src;
 
-		*iface = net_if_ipv4_select_src_iface_addr(
-			&net_sin(net_sad(dst))->sin_addr, &src);
+		if (ifindex > 0) {
+			*iface = net_if_get_by_index(ifindex);
+			src = net_if_ipv4_select_src_addr(*iface,
+				&net_sin(net_sad(dst))->sin_addr);
+		} else {
+			*iface = net_if_ipv4_select_src_iface_addr(
+				&net_sin(net_sad(dst))->sin_addr, &src);
+		}
 
 		net_ipv4_addr_copy_raw((uint8_t *)&net_sin(addr)->sin_addr,
 				       (const uint8_t *)src);
@@ -332,6 +346,49 @@ static int wg_send_keepalive(struct wg_iface_context *ctx,
 	struct net_if *target_iface;
 	struct net_pkt *pkt;
 	int ret;
+
+	/* Without a session there is nothing to keep alive: start the
+	 * handshake instead. Before the first handshake no endpoint is learnt
+	 * yet, so initiate to the configured one, as the first data packet to
+	 * the peer does.
+	 */
+	if (!peer->session.keypair.current.is_valid) {
+		if (peer->endpoint.ss_family == NET_AF_UNSPEC) {
+			memcpy(&peer->endpoint, &peer->cfg_endpoint, sizeof(peer->endpoint));
+		}
+
+		if (peer->endpoint.ss_family == NET_AF_UNSPEC) {
+			/* The peer has to contact us first */
+			return -EDESTADDRREQ;
+		}
+
+		/* The periodic timer resends an initiation left unanswered while
+		 * there is no session. Setting send_handshake here would outlive
+		 * the handshake and start another one after the rekey timeout.
+		 */
+		if (!can_send_init(peer)) {
+			return 0;
+		}
+
+		/* Cleared once the initiation is sent, else the periodic timer
+		 * retries it.
+		 */
+		peer->send_handshake = true;
+
+		ret = start_handshake(ctx, peer);
+		if (ret < 0) {
+			(void)k_work_schedule(&ctx->wg_ctx->wg_periodic_timer,
+					      K_MSEC(WG_TIMER_PERIOD));
+			return ret;
+		}
+
+		/* As the first data packet does, so that it does not start
+		 * another handshake.
+		 */
+		peer->last_tx = sys_clock_tick_get_32();
+
+		return 0;
+	}
 
 	ret = select_target_iface(peer, addr, &peer->endpoint, &target_iface);
 	if (ret < 0) {
@@ -689,11 +746,11 @@ static int handle_cookie_reply(struct wg_peer *peer,
 	return 0;
 }
 
-static int handle_transport_data(struct wg_peer *peer,
-				 struct net_sockaddr *peer_addr,
-				 struct net_pkt *pkt,
-				 size_t ip_udp_hdr_len,
-				 size_t data_len)
+ZTESTABLE_STATIC int handle_transport_data(struct wg_peer *peer,
+					   struct net_sockaddr *peer_addr,
+					   struct net_pkt *pkt,
+					   size_t ip_udp_hdr_len,
+					   size_t data_len)
 {
 	NET_PKT_DATA_ACCESS_DEFINE(access, struct msg_transport_data);
 	struct msg_transport_data *msg;
@@ -709,10 +766,32 @@ static int handle_transport_data(struct wg_peer *peer,
 		/* No valid session for this receiver index. The remote peer
 		 * might have a stale session. Trigger a new handshake if we
 		 * haven't done so recently.
+		 *
+		 * Note that this message is not authenticated in any way. As
+		 * the receiver index is unknown, there is no key to verify it
+		 * with, so anyone able to send an UDP packet to our port can
+		 * craft one. It must therefore never be allowed to change the
+		 * peer endpoint, as that would let an off-path attacker steer
+		 * our handshake initiations, and thus the tunnel, to an
+		 * address of their choosing. Send the handshake only to the
+		 * endpoint that we have learnt from authenticated messages,
+		 * or to the configured one if we have none yet.
 		 */
 		if (!peer->handshake.is_valid && !peer->session.keypair.current.is_valid) {
+			if (peer->endpoint.ss_family == NET_AF_UNSPEC) {
+				memcpy(&peer->endpoint, &peer->cfg_endpoint,
+				       sizeof(peer->endpoint));
+			}
+
+			if (peer->endpoint.ss_family == NET_AF_UNSPEC) {
+				/* No known endpoint to initiate to. This peer
+				 * can only be reached after it has contacted
+				 * us with a valid handshake initiation.
+				 */
+				return -ENOENT;
+			}
+
 			peer->send_handshake = true;
-			memcpy(&peer->endpoint, peer_addr, sizeof(peer->endpoint));
 			(void)k_work_schedule(&peer->ctx->wg_ctx->wg_periodic_timer,
 					      K_NO_WAIT);
 		}
@@ -739,7 +818,7 @@ static struct wg_peer *peer_lookup_by_iface(struct net_if *iface)
 static struct wg_peer *peer_lookup_by_virtual_iface(struct net_if *iface)
 {
 	struct virtual_interface_context *ctx, *tmp;
-	const struct virtual_interface_api *api;
+	const struct virtual_interface_driver_api *api;
 	struct wg_peer *peer, *next;
 	sys_slist_t *interfaces;
 
@@ -751,7 +830,7 @@ static struct wg_peer *peer_lookup_by_virtual_iface(struct net_if *iface)
 		}
 
 		api = net_if_get_device(ctx->virtual_iface)->api;
-		if (api == NULL || api->recv == NULL) {
+		if (api->recv == NULL) {
 			continue;
 		}
 
@@ -915,7 +994,7 @@ drop:
 
 static int wg_ctrl_send(const struct device *dev, struct net_pkt *pkt)
 {
-	struct wg_context *ctx = dev->data;
+	__maybe_unused struct wg_context *ctx = dev->data;
 
 	net_stats_update_bytes_sent(ctx->iface, net_pkt_get_len(pkt));
 
@@ -970,7 +1049,7 @@ static int wg_ctrl_stop(const struct device *dev)
 	return 0;
 }
 
-static struct dummy_api wg_api = {
+static DEVICE_API(dummy, wg_api) = {
 	.iface_api.init = wg_ctrl_iface_init,
 	.recv = wg_ctrl_recv,
 	.send = wg_ctrl_send,
@@ -1125,7 +1204,7 @@ static int interface_send(struct net_if *iface, struct net_pkt *pkt)
 	struct net_pkt *pkt_encrypted;
 	struct net_if *target_iface;
 	struct net_buf *buf;
-	const struct dummy_api *api;
+	const struct dummy_driver_api *api;
 	struct wg_keypair *keypair;
 	struct wg_peer *peer;
 	size_t pkt_len, copied, padded_len;
@@ -1456,7 +1535,7 @@ static int interface_get_config(struct net_if *iface,
 	return -ENOTSUP;
 }
 
-static const struct virtual_interface_api wg_iface_api = {
+static DEVICE_API(virtual_interface, wg_iface_api) = {
 	.iface_api.init = iface_init,
 
 	.get_capabilities = get_capabilities,
@@ -1633,7 +1712,7 @@ out:
  */
 static int send_data(struct wg_iface_context *ctx, struct net_pkt *pkt)
 {
-	const struct dummy_api *api = net_if_get_device(ctx->attached_to)->api;
+	const struct dummy_driver_api *api = net_if_get_device(ctx->attached_to)->api;
 
 	return net_l2_send(api->send, net_if_get_device(ctx->attached_to),
 			   ctx->attached_to, pkt);

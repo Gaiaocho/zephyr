@@ -15,7 +15,7 @@
  * @brief L2CAP
  * @defgroup bt_l2cap L2CAP
  * @since 1.0
- * @version 1.0.0
+ * @version 1.1.1
  * @ingroup bluetooth
  * @{
  */
@@ -304,6 +304,8 @@ struct bt_l2cap_le_chan {
 
 	struct k_work			rx_work;
 	struct k_fifo			rx_queue;
+	/* Calls bt_l2cap_chan_ops.status on behalf of the TX processor */
+	struct k_work			status_work;
 
 	bt_l2cap_chan_state_t		state;
 	/** Remote PSM to be connected */
@@ -313,6 +315,14 @@ struct bt_l2cap_le_chan {
 	/** Opcode of the pending request. Used to match responses with requests. */
 	uint8_t                         pending_req;
 	bt_security_t			required_sec_level;
+
+	/** @cond INTERNAL_HIDDEN */
+	/* Server that accepted this channel, NULL when the channel was
+	 * initiated locally. Keeps a reference to that server for as long as
+	 * the channel lives.
+	 */
+	struct bt_l2cap_server		*_server;
+	/** @endcond */
 
 	/* Response Timeout eXpired (RTX) timer */
 	struct k_work_delayable		rtx_work;
@@ -353,25 +363,30 @@ struct bt_l2cap_fixed_chan {
 	 *
 	 *  This callback needs to be provided by the application, and is invoked when a new
 	 *  connection has been established. If accepting the connection, the user is expected to
-	 *  allocate memory with suitable alignment for the type @ref bt_l2cap_chan for the channel,
-	 *  and update the channel reference @p chan to point to the allocated memory. The channel
-	 *  should be initialized by assigning the callbacks to the @ref bt_l2cap_chan_ops field
-	 *  as follows:
+	 *  allocate memory for a zero-initialized object of type @ref bt_l2cap_le_chan, and update
+	 *  the channel reference @p chan to point to the @ref bt_l2cap_le_chan.chan member of the
+	 *  allocated object. The channel should be initialized by assigning the callbacks to the
+	 *  @ref bt_l2cap_chan_ops field as follows:
 	 *  @code
 	 *  static int accept(struct bt_conn *conn, struct bt_l2cap_chan **chan)
 	 *  {
 	 *      // Allocation of fixed_chan and definition of the ops are assumed done prior.
-	 *      *chan = &fixed_chan;
-	 *
-	 *      **chan = (struct bt_l2cap_chan){
-	 *          .ops = &ops,
+	 *      fixed_chan = (struct bt_l2cap_le_chan){
+	 *          .chan.ops = &ops,
 	 *      };
+	 *
+	 *      *chan = &fixed_chan.chan;
 	 *
 	 *      return 0;
 	 *  }
 	 *  @endcode
 	 *  The allocated context needs to be valid for the lifetime of the channel, i. e.
 	 *  freeing of the memory can be done in the @ref bt_l2cap_chan_ops.released callback.
+	 *
+	 *  @warning Even though the reference passed back through @p chan is a
+	 *           @ref bt_l2cap_chan, it must be the @ref bt_l2cap_le_chan.chan member of a
+	 *           @ref bt_l2cap_le_chan object. The stack uses the containing object, so
+	 *           returning a bare @ref bt_l2cap_chan would result in out-of-bounds access.
 	 *
 	 *  @param conn The connection that has been established.
 	 *  @param chan L2CAP channel reference.
@@ -516,8 +531,8 @@ struct bt_l2cap_br_chan {
 	struct bt_l2cap_br_endpoint     rx;
 	/** Channel Transmission Endpoint */
 	struct bt_l2cap_br_endpoint     tx;
-	/* For internal use only */
-	atomic_t                        flags[1];
+	/** Channel flags, for internal use only */
+	ATOMIC_DEFINE(flags, 64);
 
 	bt_l2cap_chan_state_t           state;
 	/** Remote PSM to be connected */
@@ -529,6 +544,13 @@ struct bt_l2cap_br_chan {
 	/* Response Timeout eXpired (RTX) timer */
 	struct k_work_delayable	        rtx_work;
 	struct k_work_sync              rtx_sync;
+
+	/** @cond INTERNAL_HIDDEN */
+
+	/** Retry worker for deferred signaling operations */
+	struct k_work_delayable         retry_work;
+
+	/** @endcond */
 
 	/** @internal To be used with @ref bt_conn.upper_data_ready */
 	sys_snode_t                     _pdu_ready;
@@ -613,6 +635,14 @@ struct bt_l2cap_br_chan {
 /** @brief L2CAP Channel operations structure.
  *
  * The object has to stay valid and constant for the lifetime of the channel.
+ *
+ * @note The callbacks are invoked from a thread context, never from an
+ *       ISR. Whether a callback is invoked from a context internal to
+ *       the stack or synchronously from within the API call that
+ *       triggers it, and from which context, is not part of the API and
+ *       may change between releases. See
+ *       @rstref{Callback execution contexts <bluetooth_callback_contexts>}
+ *       for the hazards of blocking in a callback and their mitigations.
  */
 struct bt_l2cap_chan_ops {
 	/** @brief Channel connected callback
@@ -831,10 +861,21 @@ struct bt_l2cap_server {
 	/** @brief Server accept callback
 	 *
 	 *  This callback is called whenever a new incoming connection requires
-	 *  authorization.
+	 *  authorization. If accepting the connection, the callback is expected
+	 *  to allocate a zero-initialized channel object and update the channel
+	 *  reference @p chan to point to its common member: for a server
+	 *  registered with bt_l2cap_server_register() the object must be of type
+	 *  @ref bt_l2cap_le_chan and @p chan set to its @ref bt_l2cap_le_chan.chan
+	 *  member, and for a server registered with bt_l2cap_br_server_register()
+	 *  the object must be of type @ref bt_l2cap_br_chan and @p chan set to its
+	 *  @ref bt_l2cap_br_chan.chan member.
 	 *
-	 *  @warning It is the responsibility of this callback to zero out the
-	 *  parent of the chan object.
+	 *  @warning Even though the reference passed back through @p chan is a
+	 *  @ref bt_l2cap_chan, it must be a member of a @ref bt_l2cap_le_chan or
+	 *  @ref bt_l2cap_br_chan object as described above. The stack uses the
+	 *  containing object, so returning a bare @ref bt_l2cap_chan would result in
+	 *  out-of-bounds access. It is the responsibility of this callback to
+	 *  zero out the containing object.
 	 *
 	 *  @param conn The connection that is requesting authorization
 	 *  @param server Pointer to the server structure this callback relates to
@@ -847,6 +888,15 @@ struct bt_l2cap_server {
 	 */
 	int (*accept)(struct bt_conn *conn, struct bt_l2cap_server *server,
 		      struct bt_l2cap_chan **chan);
+
+	/** @cond INTERNAL_HIDDEN */
+#if defined(CONFIG_BT_L2CAP_DYNAMIC_CHANNEL)
+	/* References held on this server: one while a connection request for
+	 * it is being handled, and one per channel it accepted.
+	 */
+	atomic_t _refs;
+#endif /* CONFIG_BT_L2CAP_DYNAMIC_CHANNEL */
+	/** @endcond */
 
 	sys_snode_t node;
 };
@@ -866,11 +916,33 @@ struct bt_l2cap_server {
  *  a GATT service, and that's how L2CAP clients discover how to connect to
  *  the server.
  *
+ *  Registering a server that is already registered fails with @c -EALREADY.
+ *
  *  @param server Server structure.
  *
  *  @return 0 in case of success or negative value in case of error.
  */
 int bt_l2cap_server_register(struct bt_l2cap_server *server);
+
+/** @brief Unregister L2CAP server.
+ *
+ *  Unregister the L2CAP server for a PSM, making the PSM available for
+ *  registration again.
+ *
+ *  @note The call does not wait for the server to become idle: while a
+ *  connection request for this server is being handled, or channels it has
+ *  accepted are still connected, it fails with @c -EBUSY instead. This also
+ *  covers a call from the server's own callbacks.
+ *
+ *  @param server Server structure.
+ *
+ *  @retval 0 Success.
+ *  @retval -EINVAL @p server is NULL.
+ *  @retval -EBUSY A connection request for @p server is being handled, or
+ *                 channels it accepted are still connected.
+ *  @retval -ENOENT @p server was not registered.
+ */
+int bt_l2cap_server_unregister(struct bt_l2cap_server *server);
 
 /** @brief Register L2CAP server on BR/EDR oriented connection.
  *
@@ -917,6 +989,7 @@ int bt_l2cap_br_server_unregister(struct bt_l2cap_server *server);
  *  @param psm Channel PSM to connect to.
  *
  *  @return 0 in case of success or negative value in case of error.
+ *  @retval -EINVAL @p conn is not an LE connection.
  */
 int bt_l2cap_ecred_chan_connect(struct bt_conn *conn,
 				struct bt_l2cap_chan **chans, uint16_t psm);
@@ -993,6 +1066,11 @@ int bt_l2cap_ecred_chan_reconfigure_explicit(struct bt_l2cap_chan **chans, size_
  *  the location (address) of bt_l2cap_chan type object which is a member
  *  of both transport dedicated objects.
  *
+ *  @note For BR/EDR connections, this function does not wait for a signaling buffer. If signaling
+ *  buffers are temporarily unavailable, the connection request will be retried asynchronously.
+ *  The return value 0 indicates that the connection process has been successfully initiated, not
+ *  that the connection request PDU has been sent.
+ *
  *  @warning It is the responsibility of the caller to zero out the
  *  parent of the chan object.
  *
@@ -1001,6 +1079,7 @@ int bt_l2cap_ecred_chan_reconfigure_explicit(struct bt_l2cap_chan **chans, size_
  *  @param psm Channel PSM to connect to.
  *
  *  @return 0 in case of success or negative value in case of error.
+ *  @retval -EINVAL @p conn is neither a BR/EDR nor an LE connection.
  */
 int bt_l2cap_chan_connect(struct bt_conn *conn, struct bt_l2cap_chan *chan,
 			  uint16_t psm);
@@ -1012,9 +1091,20 @@ int bt_l2cap_chan_connect(struct bt_conn *conn, struct bt_l2cap_chan *chan,
  *  Regarding to input parameter, to get details see reference description
  *  to bt_l2cap_chan_connect() API above.
  *
+ *  @note This function does not wait for a signaling buffer. If signaling buffers are
+ *  temporarily unavailable, the disconnection request will be retried asynchronously, except in
+ *  the case of ``-ENOMEM`` below. The return value 0 indicates that the disconnection process has
+ *  been successfully initiated, not that the disconnection request PDU has been sent.
+ *
  *  @param chan Channel object.
  *
- *  @return 0 in case of success or negative value in case of error.
+ *  @retval 0 Disconnection initiated.
+ *  @retval -ENOTCONN The channel has no connection.
+ *  @retval -EALREADY A BR/EDR channel is already being disconnected.
+ *  @retval -ENOMEM No buffer for the request of an LE channel that is not connected or that waits
+ *                  for the response to a request of its own. The channel is left as it is: a
+ *                  disconnection in progress continues, and otherwise the call can be repeated
+ *                  once the pending request has completed.
  */
 int bt_l2cap_chan_disconnect(struct bt_l2cap_chan *chan);
 

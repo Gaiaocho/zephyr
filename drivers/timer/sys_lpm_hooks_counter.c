@@ -9,21 +9,14 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/counter.h>
 #include <zephyr/drivers/timer/system_timer_lpm.h>
+#include <zephyr/pm/device.h>
 
-#if defined(CONFIG_CORTEX_M_SYSTICK) && !DT_HAS_CHOSEN(zephyr_system_timer_companion)
-/*
- * Compatibility fallback inherited from the Cortex-M SysTick driver:
- * the deprecated /chosen/zephyr,cortex-m-idle-timer may be used to select
- * the companion counter instead of /chosen/zephyr,system-timer-companion.
- *
- * This is scheduled for removal in Zephyr 4.6.0.
- */
-#define COMPANION_COUNTER_NODE DT_CHOSEN(zephyr_cortex_m_idle_timer)
-#else /* CONFIG_CORTEX_M_SYSTICK && !DT_HAS_CHOSEN(zephyr_system_timer_companion) */
-#define COMPANION_COUNTER_NODE DT_CHOSEN(zephyr_system_timer_companion)
-#endif /* CONFIG_CORTEX_M_SYSTICK && !DT_HAS_CHOSEN(zephyr_system_timer_companion) */
+BUILD_ASSERT(DT_PROP(SYSTEM_TIMER_COMPANION_NODE, wakeup_source),
+	"The Low-Power Companion counter (chosen `zephyr,system-timer-companion` at path: "
+	DT_NODE_PATH(SYSTEM_TIMER_COMPANION_NODE) ") must be marked as wake-up capable! "
+	"(hint: add the `wakeup-source` property to the node)");
 
-static const struct device *lpm_counter = DEVICE_DT_GET(COMPANION_COUNTER_NODE);
+static const struct device *lpm_counter = DEVICE_DT_GET(SYSTEM_TIMER_COMPANION_NODE);
 
 /* Companion counter's value before entry in low-power state. */
 static uint32_t counter_pre_lpm_ticks;
@@ -37,6 +30,24 @@ static uint32_t counter_scheduled_lpm_ticks;
 /* Channel ID of the alarm that should wake up the system */
 #define LPM_ALARM_CHANNEL_ID 0U
 
+void z_sys_clock_lpm_init(void)
+{
+	__ASSERT(!IS_ENABLED(CONFIG_PM_DEVICE) || pm_device_wakeup_is_capable(lpm_counter),
+		"Low-Power Companion counter not marked as wakeup-source!");
+
+	/*
+	 * Enable low-power companion counter as wake-up source.
+	 *
+	 * This cannot be done from z_sys_clock_lpm_enter() because this runs
+	 * after all devices have been suspended, which is what enabling the
+	 * counter as wake-up source is supposed to prevent.
+	 *
+	 * NOTE: it is assumed that no other code will change this configuration.
+	 * Doing so is an application error and will result in undefined behavior.
+	 */
+	pm_device_wakeup_enable(lpm_counter, true);
+}
+
 /* Stub to satisfy the Counter API (`callback` cannot be NULL) */
 static void stub_alarm_callback(const struct device *dev, uint8_t chan_id,
 				      uint32_t ticks, void *user_data)
@@ -49,6 +60,10 @@ static void stub_alarm_callback(const struct device *dev, uint8_t chan_id,
 
 void z_sys_clock_lpm_enter(uint64_t max_lpm_time_us)
 {
+	/* Catch misuse of the device by external code */
+	__ASSERT(!IS_ENABLED(CONFIG_PM_DEVICE) || pm_device_wakeup_is_enabled(lpm_counter),
+		"External code must not disable Low-Power Companion wake-up source!");
+
 	counter_scheduled_lpm_ticks = counter_us_to_ticks(lpm_counter, max_lpm_time_us);
 
 	struct counter_alarm_cfg cfg = {

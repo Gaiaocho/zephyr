@@ -37,6 +37,7 @@ struct spi_stm32_config {
 	int mssi_clocks;
 	uint32_t fifo_max_transfer_size;
 	uint8_t fifo_size;
+	bool gpio_control: 1;
 #endif
 	bool ioswp: 1;
 	bool soft_nss: 1;
@@ -52,6 +53,8 @@ struct spi_stm32_config {
 #define SPI_STM32_DMA_TX_DONE_FLAG	0x04
 #define SPI_STM32_DMA_DONE_FLAG	\
 	(SPI_STM32_DMA_RX_DONE_FLAG | SPI_STM32_DMA_TX_DONE_FLAG)
+/* MASRX suspend with the RX FIFO still full: the waiting thread releases it */
+#define SPI_STM32_DMA_SUSPEND_FLAG	0x08
 
 #define SPI_STM32_DMA_TX	0x01
 #define SPI_STM32_DMA_RX	0x02
@@ -136,6 +139,25 @@ static inline uint32_t ll_get_transfer_direction(SPI_TypeDef *spi)
 #endif /* CONFIG_STM32_HAL2 */
 }
 
+static inline void ll_set_transfer_size(SPI_TypeDef *spi, uint32_t size)
+{
+#if DT_HAS_COMPAT_STATUS_OKAY(st_stm32h7_spi)
+	LL_SPI_SetTransferSize(spi, size);
+#endif /* st_stm32h7_spi */
+}
+
+static inline uint32_t ll_get_transfer_size(SPI_TypeDef *spi)
+{
+#if DT_HAS_COMPAT_STATUS_OKAY(st_stm32h7_spi)
+	return LL_SPI_GetTransferSize(spi);
+#else
+	/* Series that don't support transfer sizes behave the same way as st_stm32h7_spi
+	 * compatibles with a TSIZE set to 0.
+	 */
+	return 0;
+#endif /* st_stm32h7_spi */
+}
+
 static inline uint32_t ll_tx_is_not_full(SPI_TypeDef *spi)
 {
 #if DT_HAS_COMPAT_STATUS_OKAY(st_stm32h7_spi)
@@ -185,6 +207,20 @@ static inline void ll_enable_int_errors(SPI_TypeDef *spi)
 #endif /* st_stm32h7_spi */
 }
 
+static inline void ll_enable_int_dxp(SPI_TypeDef *spi)
+{
+#if DT_HAS_COMPAT_STATUS_OKAY(st_stm32h7_spi)
+	LL_SPI_EnableIT_DXP(spi);
+#endif /* st_stm32h7_spi */
+}
+
+static inline void ll_enable_int_eot(SPI_TypeDef *spi)
+{
+#if DT_HAS_COMPAT_STATUS_OKAY(st_stm32h7_spi)
+	LL_SPI_EnableIT_EOT(spi);
+#endif /* st_stm32h7_spi */
+}
+
 static inline void ll_disable_int_tx_empty(SPI_TypeDef *spi)
 {
 #if DT_HAS_COMPAT_STATUS_OKAY(st_stm32h7_spi)
@@ -216,6 +252,20 @@ static inline void ll_disable_int_errors(SPI_TypeDef *spi)
 #endif /* st_stm32h7_spi */
 }
 
+static inline void ll_disable_int_dxp(SPI_TypeDef *spi)
+{
+#if DT_HAS_COMPAT_STATUS_OKAY(st_stm32h7_spi)
+	LL_SPI_DisableIT_DXP(spi);
+#endif /* st_stm32h7_spi */
+}
+
+static inline void ll_disable_int_eot(SPI_TypeDef *spi)
+{
+#if DT_HAS_COMPAT_STATUS_OKAY(st_stm32h7_spi)
+	LL_SPI_DisableIT_EOT(spi);
+#endif /* st_stm32h7_spi */
+}
+
 static inline bool ll_are_int_disabled(SPI_TypeDef *spi)
 {
 #if DT_HAS_COMPAT_STATUS_OKAY(st_stm32h7_spi)
@@ -225,6 +275,20 @@ static inline bool ll_are_int_disabled(SPI_TypeDef *spi)
 	       !LL_SPI_IsEnabledIT_RXNE(spi) &&
 	       !LL_SPI_IsEnabledIT_TXE(spi);
 #endif
+}
+
+static inline void ll_clear_eot_flag(SPI_TypeDef *spi)
+{
+#if DT_HAS_COMPAT_STATUS_OKAY(st_stm32h7_spi)
+	LL_SPI_ClearFlag_EOT(spi);
+#endif /* st_stm32h7_spi */
+}
+
+static inline void ll_clear_txtf_flag(SPI_TypeDef *spi)
+{
+#if DT_HAS_COMPAT_STATUS_OKAY(st_stm32h7_spi)
+	LL_SPI_ClearFlag_TXTF(spi);
+#endif /* st_stm32h7_spi */
 }
 
 static inline uint32_t ll_spi_is_busy(SPI_TypeDef *spi)
@@ -265,7 +329,7 @@ static inline void ll_disable_spi(SPI_TypeDef *spi)
 }
 
 #if defined(SPI_CFG2_IOSWP)
-static inline void ll_spi_swap_mosi_miso(SPI_TypeDef *spi)
+static inline void ll_spi_swap_sdo_sdi(SPI_TypeDef *spi)
 {
 #if defined(CONFIG_STM32_HAL2)
 	LL_SPI_EnableMosiMisoSwap(spi);

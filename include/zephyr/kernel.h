@@ -20,6 +20,7 @@
 #include <stdbool.h>
 #include <zephyr/toolchain.h>
 #include <zephyr/tracing/tracing_macros.h>
+#include <zephyr/sleep.h>
 #include <zephyr/sys/mem_stats.h>
 #include <zephyr/sys/iterable_sections.h>
 #include <zephyr/sys/ring_buffer.h>
@@ -745,57 +746,6 @@ void k_thread_system_pool_assign(struct k_thread *thread);
 __syscall int k_thread_join(struct k_thread *thread, k_timeout_t timeout);
 
 /**
- * @brief Put the current thread to sleep.
- *
- * This routine puts the current thread to sleep for @a duration,
- * specified as a k_timeout_t object.
- *
- * @param timeout Desired duration of sleep.
- *
- * @return Zero if the requested time has elapsed or the time left to
- * sleep rounded up to the nearest millisecond (e.g. if the thread was
- * awoken by the \ref k_wakeup call).  Will be clamped to INT_MAX in
- * the case where the remaining time is unrepresentable in an int32_t.
- * If @a timeout is K_FOREVER and the thread is woken early via
- * k_wakeup(), -1 is returned.
- */
-__syscall int32_t k_sleep(k_timeout_t timeout);
-
-/**
- * @brief Put the current thread to sleep.
- *
- * This routine puts the current thread to sleep for @a duration milliseconds.
- *
- * @param ms Number of milliseconds to sleep.
- *
- * @return Zero if the requested time has elapsed or if the thread was woken up
- * by the \ref k_wakeup call, the time left to sleep rounded up to the nearest
- * millisecond.
- */
-static inline int32_t k_msleep(int32_t ms)
-{
-	return k_sleep(Z_TIMEOUT_MS(ms));
-}
-
-/**
- * @brief Put the current thread to sleep with microsecond resolution.
- *
- * This function is unlikely to work as expected without kernel tuning.
- * In particular, because the lower bound on the duration of a sleep is
- * the duration of a tick, @kconfig{CONFIG_SYS_CLOCK_TICKS_PER_SEC} must be
- * adjusted to achieve the resolution desired. The implications of doing
- * this must be understood before attempting to use k_usleep(). Use with
- * caution.
- *
- * @param us Number of microseconds to sleep.
- *
- * @return Zero if the requested time has elapsed or if the thread was woken up
- * by the \ref k_wakeup call, the time left to sleep rounded up to the nearest
- * microsecond.
- */
-__syscall int32_t k_usleep(int32_t us);
-
-/**
  * @brief Cause the current thread to busy wait.
  *
  * This routine causes the current thread to execute a "do nothing" loop for
@@ -922,6 +872,21 @@ static inline k_tid_t k_current_get(void)
 }
 
 /**
+ * @brief Test whether provided thread is user thread.
+ *
+ * @isr_ok
+ *
+ * @param thread Thread to test.
+ *
+ * @retval true if provided thread is user thread
+ * @retval false if provided thread is not user thread
+ */
+static inline bool k_thread_is_user_thread(const struct k_thread *thread)
+{
+	return (thread->base.user_options & K_USER) != 0U;
+}
+
+/**
  * @brief Abort a thread.
  *
  * This routine permanently stops execution of @a thread. The thread is taken
@@ -1005,7 +970,7 @@ struct _static_thread_data {
 #define Z_THREAD_INIT_DELAY_INITIALIZER(ms) .init_delay_ms = (ms)
 #define Z_THREAD_INIT_DELAY(thread) SYS_TIMEOUT_MS((thread)->init_delay_ms)
 #else
-#define Z_THREAD_INIT_DELAY_INITIALIZER(ms) .init_delay = SYS_TIMEOUT_MS_INIT(ms)
+#define Z_THREAD_INIT_DELAY_INITIALIZER(ms) .init_delay = SYS_TIMEOUT_MS(ms)
 #define Z_THREAD_INIT_DELAY(thread) (thread)->init_delay
 #endif
 
@@ -1901,8 +1866,6 @@ struct k_timer {
 	/* user-specific data, also used to support legacy features */
 	void *user_data;
 
-	SYS_PORT_TRACING_TRACKING_FIELD(k_timer)
-
 #ifdef CONFIG_OBJ_CORE_TIMER
 	struct k_obj_core  obj_core;
 #endif
@@ -2384,7 +2347,9 @@ struct k_queue {
 
 	Z_DECL_POLL_EVENT
 
-	SYS_PORT_TRACING_TRACKING_FIELD(k_queue)
+#ifdef CONFIG_OBJ_CORE_QUEUE
+	struct k_obj_core  obj_core;
+#endif
 /**
  * INTERNAL_HIDDEN @endcond
  */
@@ -2438,8 +2403,8 @@ __syscall void k_queue_cancel_wait(struct k_queue *queue);
  * @brief Append an element to the end of a queue.
  *
  * This routine appends a data item to @a queue. A queue data item must be
- * aligned on a word boundary, and the first word of the item is reserved
- * for the kernel's use.
+ * aligned as required for a pointer, and its first pointer-sized field is
+ * reserved for the kernel's use.
  *
  * @isr_ok
  *
@@ -2470,8 +2435,8 @@ __syscall int32_t k_queue_alloc_append(struct k_queue *queue, void *data);
  * @brief Prepend an element to a queue.
  *
  * This routine prepends a data item to @a queue. A queue data item must be
- * aligned on a word boundary, and the first word of the item is reserved
- * for the kernel's use.
+ * aligned as required for a pointer, and its first pointer-sized field is
+ * reserved for the kernel's use.
  *
  * @isr_ok
  *
@@ -2502,8 +2467,8 @@ __syscall int32_t k_queue_alloc_prepend(struct k_queue *queue, void *data);
  * @brief Inserts an element to a queue.
  *
  * This routine inserts a data item to @a queue after previous item. A queue
- * data item must be aligned on a word boundary, and the first word of
- * the item is reserved for the kernel's use.
+ * data item must be aligned as required for a pointer, and its first
+ * pointer-sized field is reserved for the kernel's use.
  *
  * @isr_ok
  *
@@ -2517,8 +2482,8 @@ void k_queue_insert(struct k_queue *queue, void *prev, void *data);
  * @brief Atomically append a list of elements to a queue.
  *
  * This routine adds a list of data items to @a queue in one operation.
- * The data items must be in a singly-linked list, with the first word
- * in each data item pointing to the next data item; the list must be
+ * The data items must be in a singly-linked list, with the first pointer-sized
+ * field in each data item pointing to the next data item; the list must be
  * NULL-terminated.
  *
  * @isr_ok
@@ -2555,8 +2520,8 @@ int k_queue_merge_slist(struct k_queue *queue, sys_slist_t *list);
 /**
  * @brief Get an element from a queue.
  *
- * This routine removes first data item from @a queue. The first word of the
- * data item is reserved for the kernel's use.
+ * This routine removes first data item from @a queue. The first pointer-sized
+ * field of the data item is reserved for the kernel's use.
  *
  * @note @a timeout must be set to K_NO_WAIT if called from ISR.
  *
@@ -2574,9 +2539,9 @@ __syscall void *k_queue_get(struct k_queue *queue, k_timeout_t timeout);
 /**
  * @brief Remove an element from a queue.
  *
- * This routine removes data item from @a queue. The first word of the
- * data item is reserved for the kernel's use. Removing elements from k_queue
- * rely on sys_slist_find_and_remove which is not a constant time operation.
+ * This routine removes data item from @a queue. The first pointer-sized field
+ * of the data item is reserved for the kernel's use. Removing elements from
+ * k_queue rely on sys_slist_find_and_remove which is not a constant time operation.
  *
  * @isr_ok
  *
@@ -2590,9 +2555,9 @@ bool k_queue_remove(struct k_queue *queue, void *data);
 /**
  * @brief Append an element to a queue only if it's not present already.
  *
- * This routine appends data item to @a queue. The first word of the data
- * item is reserved for the kernel's use. Appending elements to k_queue
- * relies on sys_slist_is_node_in_list which is not a constant time operation.
+ * This routine appends data item to @a queue. The first pointer-sized field of
+ * the data item is reserved for the kernel's use. Appending elements to
+ * k_queue relies on sys_slist_is_node_in_list which is not a constant time operation.
  *
  * @isr_ok
  *
@@ -2666,9 +2631,9 @@ __syscall void *k_queue_peek_tail(struct k_queue *queue);
  *
  * A k_futex is a lightweight mutual exclusion primitive designed
  * to minimize kernel involvement. Uncontended operation relies
- * only on atomic access to shared memory. k_futex are tracked as
- * kernel objects and can live in user memory so that any access
- * bypasses the kernel object permission management mechanism.
+ * only on atomic access to shared memory. k_futex live in user
+ * memory so that any address can be used as long as the thread
+ * has access to the underlying memory.
  */
 struct k_futex {
 	/**
@@ -2678,37 +2643,6 @@ struct k_futex {
 	 */
 	atomic_t val;
 };
-
-/**
- * @brief futex kernel data structure
- *
- * z_futex_data are the helper data structure for k_futex to complete
- * futex contended operation on kernel side, structure z_futex_data
- * of every futex object is invisible in user mode.
- *
- * All the members are internal and should not be accessed directly.
- */
-struct z_futex_data {
-/**
- * @cond INTERNAL_HIDDEN
- */
-	_wait_q_t wait_q;
-	struct k_spinlock lock;
-/**
- * INTERNAL_HIDDEN @endcond
- */
-};
-
-/**
- * @cond INTERNAL_HIDDEN
- */
-#define Z_FUTEX_DATA_INITIALIZER(obj) \
-	{ \
-	.wait_q = Z_WAIT_Q_INIT(&obj.wait_q) \
-	}
-/**
- * INTERNAL_HIDDEN @endcond
- */
 
 /**
  * @defgroup futex_apis FUTEX APIs
@@ -2729,14 +2663,12 @@ struct z_futex_data {
  *                K_NO_WAIT or K_FOREVER.
  * @retval -EACCES Caller does not have write access to futex address.
  * @retval -EAGAIN If the futex value did not match the expected parameter.
- * @retval -EINVAL Futex parameter address not recognized by the kernel.
  * @retval -ETIMEDOUT Thread woke up due to timeout and not a futex wakeup.
  * @retval 0 if the caller went to sleep and was woken up. The caller
  *	     should check the futex's value on wakeup to determine if it needs
  *	     to block again.
  */
-__syscall int k_futex_wait(struct k_futex *futex, int expected,
-			   k_timeout_t timeout);
+__syscall int k_futex_wait(struct k_futex *futex, atomic_val_t expected, k_timeout_t timeout);
 
 /**
  * @brief Wake one/all threads pending on a futex
@@ -2749,7 +2681,6 @@ __syscall int k_futex_wait(struct k_futex *futex, int expected,
  * @param wake_all If true, wake up all pending threads; If false,
  *                 wakeup the highest priority thread.
  * @retval -EACCES Caller does not have access to the futex address.
- * @retval -EINVAL Futex parameter address not recognized by the kernel.
  * @retval >=0 Number of threads that were woken up.
  */
 __syscall int k_futex_wake(struct k_futex *futex, bool wake_all);
@@ -2782,8 +2713,6 @@ struct k_event {
 	_wait_q_t         wait_q;
 	uint32_t          events;
 	struct k_spinlock lock;
-
-	SYS_PORT_TRACING_TRACKING_FIELD(k_event)
 
 #ifdef CONFIG_OBJ_CORE_EVENT
 	struct k_obj_core obj_core;
@@ -2909,6 +2838,9 @@ __syscall uint32_t k_event_clear(struct k_event *event, uint32_t events);
  * @param timeout Waiting period for the desired set of events or one of the
  *                special values K_NO_WAIT and K_FOREVER.
  *
+ * @note If @p events is zero, this function returns 0 immediately. If @p reset is true,
+ *       the events currently tracked by the event object are reset before returning.
+ *
  * @retval non-zero set of matching events upon success
  * @retval 0 if matching events were not received within the specified time
  */
@@ -2936,6 +2868,9 @@ __syscall uint32_t k_event_wait(struct k_event *event, uint32_t events,
  * @param timeout Waiting period for the desired set of events or one of the
  *                special values K_NO_WAIT and K_FOREVER.
  *
+ * @note If @p events is zero, this function returns 0 immediately. If @p reset is true,
+ *       the events currently tracked by the event object are reset before returning.
+ *
  * @retval non-zero set of matching events upon success
  * @retval 0 if matching events were not received within the specified time
  */
@@ -2958,6 +2893,9 @@ __syscall uint32_t k_event_wait_all(struct k_event *event, uint32_t events,
  * @param timeout Waiting period for the desired set of events or one of the
  *                special values K_NO_WAIT and K_FOREVER.
  *
+ * @note If @p events is zero, this function returns 0 immediately. If @p reset is true,
+ *       the events currently tracked by the event object are reset before returning.
+ *
  * @retval non-zero set of matching events upon success
  * @retval 0 if no matching event was received within the specified time
  */
@@ -2979,6 +2917,9 @@ __syscall uint32_t k_event_wait_safe(struct k_event *event, uint32_t events,
  *              before waiting. If false, do not clear the events.
  * @param timeout Waiting period for the desired set of events or one of the
  *                special values K_NO_WAIT and K_FOREVER.
+ *
+ * @note If @p events is zero, this function returns 0 immediately. If @p reset is true,
+ *       the events currently tracked by the event object are reset before returning.
  *
  * @retval non-zero set of matching events upon success
  * @retval 0 if all matching events were not received within the specified time
@@ -3088,8 +3029,8 @@ struct k_fifo {
 /**
  * @brief Add an element to a FIFO queue.
  *
- * This routine adds a data item to @a fifo. A FIFO data item must be
- * aligned on a word boundary, and the first word of the item is reserved
+ * This routine adds a data item to @a fifo. A FIFO data item must be aligned
+ * as required for a pointer, and its first pointer-sized field is reserved
  * for the kernel's use.
  *
  * @isr_ok
@@ -3134,8 +3075,8 @@ struct k_fifo {
  * @brief Atomically add a list of elements to a FIFO.
  *
  * This routine adds a list of data items to @a fifo in one operation.
- * The data items must be in a singly-linked list, with the first word of
- * each data item pointing to the next data item; the list must be
+ * The data items must be in a singly-linked list, with the first pointer-sized
+ * field in each data item pointing to the next data item; the list must be
  * NULL-terminated.
  *
  * @isr_ok
@@ -3181,7 +3122,8 @@ struct k_fifo {
  * @brief Get an element from a FIFO queue.
  *
  * This routine removes a data item from @a fifo in a "first in, first out"
- * manner. The first word of the data item is reserved for the kernel's use.
+ * manner. The first pointer-sized field of the data item is reserved for the
+ * kernel's use.
  *
  * @note @a timeout must be set to K_NO_WAIT if called from ISR.
  *
@@ -3328,7 +3270,7 @@ struct k_lifo {
  * @brief Add an element to a LIFO queue.
  *
  * This routine adds a data item to @a lifo. A LIFO queue data item must be
- * aligned on a word boundary, and the first word of the item is
+ * aligned as required for a pointer, and its first pointer-sized field is
  * reserved for the kernel's use.
  *
  * @isr_ok
@@ -3373,7 +3315,8 @@ struct k_lifo {
  * @brief Get an element from a LIFO queue.
  *
  * This routine removes a data item from @a LIFO in a "last in, first out"
- * manner. The first word of the data item is reserved for the kernel's use.
+ * manner. The first pointer-sized field of the data item is reserved for the
+ * kernel's use.
  *
  * @note @a timeout must be set to K_NO_WAIT if called from ISR.
  *
@@ -3422,8 +3365,6 @@ struct k_stack {
 	stack_data_t *base, *next, *top;
 
 	uint8_t flags;
-
-	SYS_PORT_TRACING_TRACKING_FIELD(k_stack)
 
 #ifdef CONFIG_OBJ_CORE_STACK
 	struct k_obj_core  obj_core;
@@ -3587,8 +3528,6 @@ struct k_mutex {
 	sys_snode_t held_node;
 #endif /* Z_MUTEX_PI_ENABLED */
 
-	SYS_PORT_TRACING_TRACKING_FIELD(k_mutex)
-
 #ifdef CONFIG_OBJ_CORE_MUTEX
 	struct k_obj_core obj_core;
 #endif
@@ -3656,6 +3595,12 @@ __syscall int k_mutex_init(struct k_mutex *mutex);
  * completes immediately and the lock count is increased by 1.
  *
  * Mutexes may not be locked in ISRs.
+ *
+ * A mutex must not be freed, or have its memory reused, while it is locked
+ * or while threads are waiting on it. A mutex embedded in a dynamically
+ * allocated object must be unlocked before that object is released;
+ * otherwise the owning thread is left tracking a mutex in memory that no
+ * longer belongs to it.
  *
  * @param mutex Address of the mutex.
  * @param timeout Waiting period to lock the mutex,
@@ -3814,8 +3759,6 @@ struct k_sem {
 
 	Z_DECL_POLL_EVENT
 
-	SYS_PORT_TRACING_TRACKING_FIELD(k_sem)
-
 #ifdef CONFIG_OBJ_CORE_SEM
 	struct k_obj_core  obj_core;
 #endif
@@ -3904,6 +3847,9 @@ __syscall void k_sem_give(struct k_sem *sem);
  * This routine sets the count of @a sem to zero.
  * Any outstanding semaphore takes will be aborted
  * with -EAGAIN.
+ *
+ * @note A reset does not wake semaphore poll waiters. They remain pending until the semaphore
+ *       becomes available or the poll operation times out.
  *
  * @param sem Address of the semaphore.
  */
@@ -5268,14 +5214,14 @@ int k_work_poll_submit_to_queue(struct k_work_q *work_q,
  *
  * Submitting a previously submitted triggered work item that is still
  * waiting for the event cancels the existing submission and reschedules it
- * the using the new event list. Note that this behavior is inherently subject
+ * using the new event list. Note that this behavior is inherently subject
  * to race conditions with the pre-existing triggered work item and work queue,
  * so care must be taken to synchronize such resubmissions externally.
  *
  * @isr_ok
  *
  * @warning
- * Provided array of events as well as a triggered work item must not be
+ * The provided array of events as well as a triggered work item must not be
  * modified until the item has been processed by the workqueue.
  *
  * @param work Address of delayed work item.
@@ -5349,8 +5295,6 @@ struct k_msgq {
 
 	/** Message queue */
 	uint8_t flags;
-
-	SYS_PORT_TRACING_TRACKING_FIELD(k_msgq)
 
 #ifdef CONFIG_OBJ_CORE_MSGQ
 	struct k_obj_core  obj_core;
@@ -5746,8 +5690,6 @@ struct k_mbox {
 	_wait_q_t rx_msg_queue;
 	struct k_spinlock lock;
 
-	SYS_PORT_TRACING_TRACKING_FIELD(k_mbox)
-
 #ifdef CONFIG_OBJ_CORE_MAILBOX
 	struct k_obj_core  obj_core;
 #endif
@@ -5913,7 +5855,6 @@ struct k_pipe {
 #ifdef CONFIG_OBJ_CORE_PIPE
 	struct k_obj_core  obj_core;
 #endif
-	SYS_PORT_TRACING_TRACKING_FIELD(k_pipe)
 /**
  * INTERNAL_HIDDEN @endcond
  */
@@ -5970,6 +5911,7 @@ struct k_pipe {
  * @retval -EAGAIN if no data could be written before the timeout expired
  * @retval -ECANCELED if the write was interrupted by k_pipe_reset(..)
  * @retval -EPIPE if the pipe was closed
+ * @retval -EOVERFLOW if @a len is greater than INT_MAX
  */
 __syscall int k_pipe_write(struct k_pipe *pipe, const uint8_t *data, size_t len,
 			   k_timeout_t timeout);
@@ -5988,6 +5930,7 @@ __syscall int k_pipe_write(struct k_pipe *pipe, const uint8_t *data, size_t len,
  * @retval -EAGAIN if no data could be read before the timeout expired
  * @retval -ECANCELED if the read was interrupted by k_pipe_reset(..)
  * @retval -EPIPE if the pipe was closed
+ * @retval -EOVERFLOW if @a len is greater than INT_MAX
  */
 __syscall int k_pipe_read(struct k_pipe *pipe, uint8_t *data, size_t len,
 			  k_timeout_t timeout);
@@ -6006,8 +5949,10 @@ __syscall void k_pipe_reset(struct k_pipe *pipe);
 /**
  * @brief Close a pipe
  *
- * This routine closes a pipe. Any threads that were blocked on the pipe
- * will be unblocked and receive an error code.
+ * This routine closes a pipe. Threads blocked in k_pipe_read() or
+ * k_pipe_write() are unblocked and receive an error. Threads waiting in
+ * k_poll() for K_POLL_TYPE_PIPE_DATA_AVAILABLE are woken as well: a
+ * closed pipe is treated as readable so k_pipe_read() can return -EPIPE.
  *
  * @param pipe Address of the pipe.
  */
@@ -6032,8 +5977,6 @@ struct k_mem_slab {
 	char *buffer;
 	char *free_list;
 	struct k_mem_slab_info info;
-
-	SYS_PORT_TRACING_TRACKING_FIELD(k_mem_slab)
 
 #ifdef CONFIG_OBJ_CORE_MEM_SLAB
 	struct k_obj_core  obj_core;

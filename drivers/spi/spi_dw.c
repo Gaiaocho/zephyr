@@ -41,10 +41,10 @@ LOG_MODULE_REGISTER(spi_dw);
 #include <zephyr/drivers/pinctrl.h>
 #endif
 
-static inline bool spi_dw_is_slave(struct spi_dw_data *spi)
+static inline bool spi_dw_is_peripheral(struct spi_dw_data *spi)
 {
-	return (IS_ENABLED(CONFIG_SPI_SLAVE) &&
-		spi_context_is_slave(&spi->ctx));
+	return (IS_ENABLED(CONFIG_SPI_PERIPHERAL) &&
+		spi_context_is_peripheral(&spi->ctx));
 }
 
 static void completed(const struct device *dev, int error)
@@ -71,7 +71,7 @@ out:
 	/* Disabling the controller */
 	clear_bit_ssienr(dev);
 
-	if (!spi_dw_is_slave(spi)) {
+	if (!spi_dw_is_peripheral(spi)) {
 		if (spi_cs_is_gpio(ctx->config)) {
 			spi_context_cs_control(ctx, false);
 		} else {
@@ -179,37 +179,37 @@ static void pull_data(const struct device *dev)
 	}
 }
 
-static int spi_dw_configure(const struct device *dev,
-			    struct spi_dw_data *spi,
-			    const struct spi_config *config)
+static int spi_dw_validate_config(const struct device *dev,
+				  const struct spi_config *config)
 {
 	const struct spi_dw_config *info = dev->config;
-	uint32_t ctrlr0 = 0U;
-
-	LOG_DBG("%p (prev %p)", config, spi->ctx.config);
-
-	if (spi_context_configured(&spi->ctx, config)) {
-		/* Nothing to do */
-		return 0;
-	}
 
 	if (config->operation & SPI_HALF_DUPLEX) {
 		LOG_ERR("Half-duplex not supported");
 		return -ENOTSUP;
 	}
 
-	/* Verify if requested op mode is relevant to this controller */
-	if (config->operation & SPI_OP_MODE_SLAVE) {
+#if !IS_ENABLED(CONFIG_SPI_DW_HSSI)
+	/* APB SSI: SSI_IS_MASTER is fixed in the netlist. */
+	if (config->operation & SPI_OP_MODE_PERIPHERAL) {
 		if (!(info->serial_target)) {
-			LOG_ERR("Slave mode not supported");
+			LOG_ERR("Peripheral mode not supported");
 			return -ENOTSUP;
 		}
 	} else {
 		if (info->serial_target) {
-			LOG_ERR("Master mode not supported");
+			LOG_ERR("Controller mode not supported");
 			return -ENOTSUP;
 		}
 	}
+#else
+	/* DWC SSI: CTRLR0[31] MST is the role. 1 = controller, 0 = peripheral. */
+	if (((config->operation & SPI_OP_MODE_PERIPHERAL) != 0U) &&
+	    !IS_ENABLED(CONFIG_SPI_PERIPHERAL)) {
+		LOG_ERR("Peripheral mode not supported");
+		return -ENOTSUP;
+	}
+#endif
 
 	if ((config->operation & SPI_TRANSFER_LSB) ||
 	    (IS_ENABLED(CONFIG_SPI_EXTENDED_MODES) &&
@@ -239,6 +239,29 @@ static int spi_dw_configure(const struct device *dev,
 		return -EINVAL;
 	}
 
+	return 0;
+}
+
+static int spi_dw_configure(const struct device *dev,
+			    struct spi_dw_data *spi,
+			    const struct spi_config *config)
+{
+	const struct spi_dw_config *info = dev->config;
+	uint32_t ctrlr0 = 0U;
+	int ret;
+
+	LOG_DBG("%p (prev %p)", config, spi->ctx.config);
+
+	if (spi_context_configured(&spi->ctx, config)) {
+		/* Nothing to do */
+		return 0;
+	}
+
+	ret = spi_dw_validate_config(dev, config);
+	if (ret != 0) {
+		return ret;
+	}
+
 	/* Word size */
 	if (!IS_ENABLED(CONFIG_SPI_DW_HSSI) && (info->max_xfer_size == 32)) {
 		ctrlr0 |= DW_SPI_CTRLR0_DFS_32(SPI_WORD_SIZE_GET(config->operation));
@@ -249,18 +272,41 @@ static int spi_dw_configure(const struct device *dev,
 	/* Determine how many bytes are required per-frame */
 	spi->dfs = SPI_WS_TO_DFS(SPI_WORD_SIZE_GET(config->operation));
 
-	/* SPI mode */
-	if (SPI_MODE_GET(config->operation) & SPI_MODE_CPOL) {
-		ctrlr0 |= DW_SPI_CTRLR0_SCPOL;
+	/* Frame format: Motorola (default) or TI SSP */
+	if (config->operation & SPI_FRAME_FORMAT_TI) {
+		ctrlr0 |= DW_SPI_CTRLR0_FRF_TI_SSP;
+		/*
+		 * TI SSP uses frame-sync pulses; SCPH/SCPOL have no
+		 * effect and per the DW SSI databook must be 0. If the
+		 * caller set CPOL/CPHA alongside TI we ignore them
+		 * silently (they're meaningless) rather than erroring,
+		 * matching behavior.
+		 */
+	} else {
+		/* SPI mode (only meaningful for Motorola frame format) */
+		if (SPI_MODE_GET(config->operation) & SPI_MODE_CPOL) {
+			ctrlr0 |= DW_SPI_CTRLR0_SCPOL;
+		}
+		if (SPI_MODE_GET(config->operation) & SPI_MODE_CPHA) {
+			ctrlr0 |= DW_SPI_CTRLR0_SCPH;
+		}
 	}
 
-	if (SPI_MODE_GET(config->operation) & SPI_MODE_CPHA) {
-		ctrlr0 |= DW_SPI_CTRLR0_SCPH;
-	}
-
+	/* Loopback mode - only valid for Motorola frame format */
 	if (SPI_MODE_GET(config->operation) & SPI_MODE_LOOP) {
 		ctrlr0 |= DW_SPI_CTRLR0_SRL;
 	}
+
+#if IS_ENABLED(CONFIG_SPI_DW_HSSI)
+	/* DWC_ssi stays a peripheral until this bit is set, so SCPOL never
+	 * reaches SCLK.
+	 */
+	if (config->operation & SPI_OP_MODE_PERIPHERAL) {
+		ctrlr0 &= ~(DW_SPI_CTRLR0_SSI_IS_MST);
+	} else {
+		ctrlr0 |= (DW_SPI_CTRLR0_SSI_IS_MST);
+	}
+#endif
 
 	/* Installing the configuration */
 	write_ctrlr0(dev, ctrlr0);
@@ -268,37 +314,40 @@ static int spi_dw_configure(const struct device *dev,
 	/* At this point, it's mandatory to set this on the context! */
 	spi->ctx.config = config;
 
-	if (!spi_dw_is_slave(spi)) {
-		/* Baud rate and Slave select, for master only */
+	if (!spi_dw_is_peripheral(spi)) {
+		/* Baud rate and peripheral select, for controller only */
 		write_baudr(dev, SPI_DW_CLK_DIVIDER(info->clock_frequency,
 						    config->frequency));
 	}
 
-	if (spi_dw_is_slave(spi)) {
-		LOG_DBG("Installed slave config %p:"
-			    " ws/dfs %u/%u, mode %u/%u/%u",
-			    config,
-			    SPI_WORD_SIZE_GET(config->operation), spi->dfs,
-			    (SPI_MODE_GET(config->operation) &
-			     SPI_MODE_CPOL) ? 1 : 0,
-			    (SPI_MODE_GET(config->operation) &
-			     SPI_MODE_CPHA) ? 1 : 0,
-			    (SPI_MODE_GET(config->operation) &
-			     SPI_MODE_LOOP) ? 1 : 0);
+	if (spi_dw_is_peripheral(spi)) {
+		LOG_DBG("Installed peripheral config %p:"
+				" ws/dfs %u/%u, mode %u/%u/%u, frf %s",
+				config,
+				SPI_WORD_SIZE_GET(config->operation), spi->dfs,
+				(SPI_MODE_GET(config->operation) &
+				SPI_MODE_CPOL) ? 1 : 0,
+				(SPI_MODE_GET(config->operation) &
+				SPI_MODE_CPHA) ? 1 : 0,
+				(SPI_MODE_GET(config->operation) &
+				SPI_MODE_LOOP) ? 1 : 0,
+				(config->operation &
+				SPI_FRAME_FORMAT_TI) ? "TI" : "Motorola");
 	} else {
-		LOG_DBG("Installed master config %p: freq %uHz (div = %u),"
-			    " ws/dfs %u/%u, mode %u/%u/%u, slave %u",
-			    config, config->frequency,
-			    SPI_DW_CLK_DIVIDER(info->clock_frequency,
-					       config->frequency),
-			    SPI_WORD_SIZE_GET(config->operation), spi->dfs,
-			    (SPI_MODE_GET(config->operation) &
-			     SPI_MODE_CPOL) ? 1 : 0,
-			    (SPI_MODE_GET(config->operation) &
-			     SPI_MODE_CPHA) ? 1 : 0,
-			    (SPI_MODE_GET(config->operation) &
-			     SPI_MODE_LOOP) ? 1 : 0,
-			    config->slave);
+		LOG_DBG("Installed controller config %p: freq %uHz (div = %u),"
+				" ws/dfs %u/%u, mode %u/%u/%u, frf %s, peripheral %u",
+				config, config->frequency,
+				SPI_DW_CLK_DIVIDER(info->clock_frequency, config->frequency),
+				SPI_WORD_SIZE_GET(config->operation), spi->dfs,
+				(SPI_MODE_GET(config->operation) &
+				SPI_MODE_CPOL) ? 1 : 0,
+				(SPI_MODE_GET(config->operation) &
+				SPI_MODE_CPHA) ? 1 : 0,
+				(SPI_MODE_GET(config->operation) &
+				SPI_MODE_LOOP) ? 1 : 0,
+				(config->operation &
+				SPI_FRAME_FORMAT_TI) ? "TI" : "Motorola",
+				config->peripheral);
 	}
 
 	return 0;
@@ -331,7 +380,7 @@ static void spi_dw_update_txftlr(const struct device *dev,
 	uint32_t dw_spi_txftlr_dflt = (info->fifo_depth * 1) / 2;
 	uint32_t reg_data = dw_spi_txftlr_dflt;
 
-	if (spi_dw_is_slave(spi)) {
+	if (spi_dw_is_peripheral(spi)) {
 		if (!spi->ctx.tx_len) {
 			reg_data = 0U;
 		} else if (spi->ctx.tx_len < dw_spi_txftlr_dflt) {
@@ -373,6 +422,8 @@ static int transceive(const struct device *dev,
 
 	spi_context_lock(&spi->ctx, asynchronous, cb, userdata, config);
 
+	clear_bit_ssienr(dev);
+
 #ifdef CONFIG_PM_DEVICE
 	if (!pm_device_is_busy(dev)) {
 		pm_device_busy_set(dev);
@@ -394,7 +445,7 @@ static int transceive(const struct device *dev,
 	/* ToDo: add a way to determine EEPROM mode */
 
 	if (tmod >= DW_SPI_CTRLR0_TMOD_RX &&
-	    !spi_dw_is_slave(spi)) {
+	    !spi_dw_is_peripheral(spi)) {
 		reg_data = spi_dw_compute_ndf(rx_bufs->buffers,
 					      rx_bufs->count,
 					      spi->dfs);
@@ -408,8 +459,8 @@ static int transceive(const struct device *dev,
 		write_ctrlr1(dev, 0);
 	}
 
-	if (spi_dw_is_slave(spi)) {
-		/* Enabling MISO line relevantly */
+	if (spi_dw_is_peripheral(spi)) {
+		/* Enabling SDO line relevantly */
 		if (tmod == DW_SPI_CTRLR0_TMOD_RX) {
 			tmod |= DW_SPI_CTRLR0_SLV_OE;
 		} else {
@@ -435,7 +486,7 @@ static int transceive(const struct device *dev,
 	/* Does Rx thresholds needs to be lower? */
 	reg_data = dw_spi_rxftlr_dflt;
 
-	if (spi_dw_is_slave(spi)) {
+	if (spi_dw_is_peripheral(spi)) {
 		if (spi->ctx.rx_len &&
 		    spi->ctx.rx_len < dw_spi_rxftlr_dflt) {
 			reg_data = spi->ctx.rx_len - 1;
@@ -455,12 +506,12 @@ static int transceive(const struct device *dev,
 		DW_SPI_IMR_UNMASK;
 	write_imr(dev, reg_data);
 
-	if (!spi_dw_is_slave(spi)) {
+	if (!spi_dw_is_peripheral(spi)) {
 		/* if cs is not defined as gpio, use hw cs */
 		if (spi_cs_is_gpio(config)) {
 			spi_context_cs_control(&spi->ctx, true);
 		} else {
-			write_ser(dev, BIT(config->slave));
+			write_ser(dev, BIT(config->peripheral));
 		}
 	}
 
@@ -469,11 +520,11 @@ static int transceive(const struct device *dev,
 
 	ret = spi_context_wait_for_completion(&spi->ctx);
 
-#ifdef CONFIG_SPI_SLAVE
-	if (spi_context_is_slave(&spi->ctx) && !ret) {
+#ifdef CONFIG_SPI_PERIPHERAL
+	if (spi_context_is_peripheral(&spi->ctx) && !ret) {
 		ret = spi->ctx.recv_frames;
 	}
-#endif /* CONFIG_SPI_SLAVE */
+#endif /* CONFIG_SPI_PERIPHERAL */
 
 out:
 	spi_context_release(&spi->ctx, ret);
